@@ -1,0 +1,22 @@
+# Web 端运行配置（演示期默认）
+demo_mode: true
+storage_root: "./storage"
+# 系统级预训练权重（仅管理员上传，与用户 storage 分离）
+pretrained_root: "./pretrained"
+job_runner: "mock" # 演示开启时强制 Mock；关闭演示后实际走 local（本机 Ultralytics）。cluster 未实现
+forbid_weight_download: true
+debug:
+  free_step_nav: true
+
+# JWT / 鉴权
+jwt_secret: "change-me-in-production-ai-platform"
+jwt_expire_minutes: 720
+
+# 种子账号（首次启动写入数据库）
+seed_users:
+  - username: admin
+    password: admin123
+    role: admin
+  - username: demo
+    password: demo123
+    role: user

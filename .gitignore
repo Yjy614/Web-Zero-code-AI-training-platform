@@ -1,0 +1,55 @@
+# —— 系统 / 编辑器 ——
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# —— Python ——
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+.env.*
+
+# —— 前端 ——
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/coverage/
+*.local
+*.tsbuildinfo
+.eslintcache
+
+# —— 运行时数据（勿上传） ——
+backend/platform_web.db
+backend/*.db
+backend/storage/
+backend/pretrained/
+backend/config/runtime_settings.json
+# Ultralytics 误写到 cwd 的默认输出
+backend/runs/
+
+# —— 权重与模型文件（任意位置） ——
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.pkl
+*.h5
+*.ckpt
+*.safetensors
