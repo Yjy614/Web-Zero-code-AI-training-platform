@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import { useAppStore } from '@/stores/app'
@@ -26,6 +26,7 @@ import {
   type WeightItem,
 } from '@/api/tasks'
 import SplitRatioBar from '@/components/wizard/SplitRatioBar.vue'
+import { trainConfigDraftKey } from '@/utils/wizardSession'
 
 const props = defineProps<{
   step: number
@@ -33,6 +34,8 @@ const props = defineProps<{
   datasetName: string
   /** 当前数据集图片数，用于划分预览 */
   imageCount?: number
+  /** 任务类型：决定权重列表来源 */
+  taskType?: string
 }>()
 
 const emit = defineEmits<{
@@ -206,14 +209,17 @@ async function ensureTask() {
   if (found) {
     task.value = found
     applyConfig(found)
+    restoreConfigDraft()
     return found
   }
   if (!taskName.value.trim()) {
     taskName.value = `${props.datasetName}_train`
   }
+  restoreConfigDraft()
   const { data } = await createTask(taskName.value.trim(), props.datasetId)
   task.value = data
   applyConfig(data)
+  restoreConfigDraft()
   return data
 }
 
@@ -250,6 +256,75 @@ function applyConfig(t: TaskItem) {
     config.train_strategy = DEFAULT_STRATEGY
   }
   syncingHyperUi = false
+}
+
+type ConfigDraft = {
+  taskName: string
+  config: TrainConfig
+  customBatchImgsz: boolean
+  customBatchDraft: number
+  customImgszDraft: number
+  customStrategyDraft: string
+}
+
+function draftStorageKey() {
+  const tt = props.taskType === 'segment' ? 'segment' : 'detect'
+  return trainConfigDraftKey(tt, props.datasetId)
+}
+
+function saveConfigDraft() {
+  if (!props.datasetId) return
+  try {
+    const payload: ConfigDraft = {
+      taskName: taskName.value,
+      config: { ...config },
+      customBatchImgsz: customBatchImgsz.value,
+      customBatchDraft: customBatchDraft.value,
+      customImgszDraft: customImgszDraft.value,
+      customStrategyDraft: customStrategyDraft.value,
+    }
+    sessionStorage.setItem(draftStorageKey(), JSON.stringify(payload))
+  } catch {
+    // 忽略存储失败
+  }
+}
+
+/** 用会话草稿覆盖表单（未点「下一步」也要能从其他菜单返回后恢复） */
+function restoreConfigDraft(): boolean {
+  if (!props.datasetId) return false
+  try {
+    const raw = sessionStorage.getItem(draftStorageKey())
+    if (!raw) return false
+    const data = JSON.parse(raw) as ConfigDraft
+    if (!data?.config) return false
+    if (data.taskName && !task.value) taskName.value = data.taskName
+    const c = data.config
+    config.train_ratio = Number(c.train_ratio ?? config.train_ratio)
+    config.val_ratio = Number(c.val_ratio ?? config.val_ratio)
+    config.test_ratio = Number(c.test_ratio ?? config.test_ratio)
+    config.epochs = Number(c.epochs ?? config.epochs)
+    config.batch = Number(c.batch ?? config.batch)
+    config.imgsz = Number(c.imgsz ?? config.imgsz)
+    config.train_strategy = String(c.train_strategy ?? config.train_strategy)
+    config.device = String(c.device ?? config.device)
+    config.pretrained_weight = sanitizeWeightName(String(c.pretrained_weight ?? ''))
+    config.augment = Boolean(c.augment ?? config.augment)
+    syncingHyperUi = true
+    customBatchImgsz.value = Boolean(data.customBatchImgsz)
+    customBatchDraft.value = Number(data.customBatchDraft ?? config.batch)
+    customImgszDraft.value = Number(data.customImgszDraft ?? config.imgsz)
+    customStrategyDraft.value = String(data.customStrategyDraft ?? config.train_strategy)
+    if (!customBatchImgsz.value) {
+      config.batch = DEFAULT_BATCH
+      config.imgsz = DEFAULT_IMGSZ
+      config.train_strategy = DEFAULT_STRATEGY
+    }
+    syncingHyperUi = false
+    normalizeSplit()
+    return true
+  } catch {
+    return false
+  }
 }
 
 watch(
@@ -295,6 +370,7 @@ async function persistConfig() {
   const t = await ensureTask()
   const { data } = await patchTask(t.id, { config: { ...config }, step: 4 })
   task.value = data
+  saveConfigDraft()
   return data
 }
 
@@ -460,6 +536,20 @@ async function onEval() {
   }
 }
 
+async function onDownloadReport() {
+  if (!task.value) {
+    ElMessage.warning('请先完成评估')
+    return
+  }
+  try {
+    await downloadTaskFile(task.value.id, 'report', 'eval_report.html')
+    ElMessage.success('已开始下载报告')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '报告下载失败'
+    ElMessage.error(msg)
+  }
+}
+
 /** 调用设置中的大模型，针对数据量与可调参数给出建议 */
 async function onAiAdvice() {
   if (!task.value) await ensureTask()
@@ -580,7 +670,8 @@ function renderChart() {
 }
 
 async function loadWeights() {
-  const { data } = await listWeights('detect')
+  const tt = props.taskType === 'segment' ? 'segment' : 'detect'
+  const { data } = await listWeights(tt)
   weights.value = data
   const current = sanitizeWeightName(config.pretrained_weight)
   if (!current || !data.some((w) => w.name === current)) {
@@ -628,6 +719,35 @@ watch(showTrainChart, async (visible) => {
   if (visible && props.step === 4) await scheduleRenderChart()
 })
 
+/** 表单变更时写入会话草稿，离开页面后仍可恢复 */
+let draftTimer: number | null = null
+function scheduleSaveDraft() {
+  if (draftTimer) window.clearTimeout(draftTimer)
+  draftTimer = window.setTimeout(() => {
+    draftTimer = null
+    saveConfigDraft()
+  }, 200)
+}
+
+watch(
+  () => [
+    taskName.value,
+    config.train_ratio,
+    config.val_ratio,
+    config.test_ratio,
+    config.epochs,
+    config.batch,
+    config.imgsz,
+    config.train_strategy,
+    config.device,
+    config.pretrained_weight,
+    config.augment,
+    customBatchImgsz.value,
+  ],
+  () => scheduleSaveDraft(),
+  { deep: false },
+)
+
 onMounted(async () => {
   await loadWeights()
   try {
@@ -639,7 +759,12 @@ onMounted(async () => {
   window.addEventListener('resize', () => chart?.resize())
 })
 
+onDeactivated(() => {
+  saveConfigDraft()
+})
+
 onUnmounted(() => {
+  if (draftTimer) window.clearTimeout(draftTimer)
   stopPoll()
   chart?.dispose()
   chart = null
@@ -812,12 +937,7 @@ onUnmounted(() => {
         >
           AI 优化建议
         </el-button>
-        <el-button
-          v-if="task"
-          @click="downloadTaskFile(task.id, 'report', 'eval_report.html')"
-        >
-          下载 HTML 报告
-        </el-button>
+        <el-button v-if="task" @click="onDownloadReport">下载 HTML 报告</el-button>
         <el-button @click="emit('update:step', 4)">上一步</el-button>
         <el-button type="primary" plain @click="emit('update:step', 6)">下一步：导出</el-button>
       </div>
@@ -859,7 +979,7 @@ onUnmounted(() => {
       </div>
       <ul class="export-list">
         <li v-for="f in exportFiles" :key="f.name">
-          <span>{{ f.name }}{{ f.demo ? '（演示文件）' : '' }}</span>
+          <span>{{ (f.name || '').split(/[/\\]/).pop() }}{{ f.demo ? '（演示文件）' : '' }}</span>
           <el-button
             v-if="task"
             link

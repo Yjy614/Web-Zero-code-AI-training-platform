@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AnnotateStepPanel from '@/components/annotate/AnnotateStepPanel.vue'
 import CleanThumb from '@/components/CleanThumb.vue'
 import TrainFlowPanel from '@/components/wizard/TrainFlowPanel.vue'
-import { getWizardSteps } from '@/composables/useWizardSteps'
+import { getWizardSteps, type WizardTaskType } from '@/composables/useWizardSteps'
 import {
   cleanDataset,
   createDataset,
@@ -21,16 +21,28 @@ import {
   type DatasetItem,
   type ImageItem,
 } from '@/api/datasets'
-import { DETECT_WIZARD_STATE_KEY } from '@/utils/wizardSession'
+import { wizardStateKey } from '@/utils/wizardSession'
 
 defineOptions({ name: 'DetectWizard' })
-
-const WIZARD_STATE_KEY = DETECT_WIZARD_STATE_KEY
 
 const route = useRoute()
 const router = useRouter()
 
-const steps = getWizardSteps('detect')
+/**
+ * 任务类型在实例创建时冻结。
+ * KeepAlive 失活后 useRoute() 会变成「当前全局路由」：若用 computed(route.meta)，
+ * 点到其他菜单会误把 segment→detect（或点到分割页把 detect→segment），
+ * 再触发重置逻辑，配置/步骤全部丢失。
+ */
+const taskType: WizardTaskType =
+  route.meta.taskType === 'segment' || String(route.name || '').includes('segment')
+    ? 'segment'
+    : 'detect'
+const steps = computed(() => getWizardSteps(taskType))
+const wizardTitle = computed(() =>
+  taskType === 'segment' ? '实例分割训练' : '目标检测训练',
+)
+const WIZARD_STATE_KEY = wizardStateKey(taskType)
 
 const active = ref(0)
 const loading = ref(false)
@@ -82,7 +94,7 @@ function clearCleanSelection() {
 }
 
 async function refreshDatasets() {
-  const { data } = await listDatasets()
+  const { data } = await listDatasets(taskType)
   datasets.value = data
 }
 
@@ -118,7 +130,7 @@ async function onCreate() {
   }
   loading.value = true
   try {
-    const { data } = await createDataset(newName.value.trim())
+    const { data } = await createDataset(newName.value.trim(), taskType)
     ElMessage.success('数据集已创建')
     newName.value = ''
     await refreshDatasets()
@@ -238,7 +250,7 @@ function clearWizardQuery() {
 }
 
 function clampReachableStep(step: number): number {
-  const target = Math.min(Math.max(0, step), steps.length - 1)
+  const target = Math.min(Math.max(0, step), steps.value.length - 1)
   if (target === 0) return 0
   if (!canGoClean.value) return 0
   if (target >= 2 && !canGoAnnotate.value) return 1
@@ -267,9 +279,21 @@ async function hydrateWizard() {
     currentId.value = targetDataset
     await refreshCurrent()
     await refreshImages()
-    active.value = clampReachableStep(targetStep)
+    const clamped = clampReachableStep(targetStep)
+    active.value = clamped
     if (active.value === 1) await prepareCleanStep()
-    persistWizardState()
+    // 仅在未因临时条件降级时写回，避免把已保存的第4步冲成更早步骤
+    if (clamped >= targetStep) persistWizardState()
+    else {
+      try {
+        sessionStorage.setItem(
+          WIZARD_STATE_KEY,
+          JSON.stringify({ datasetId: currentId.value, step: targetStep }),
+        )
+      } catch {
+        // 忽略存储失败
+      }
+    }
   }
 
   clearWizardQuery()
@@ -425,6 +449,11 @@ onMounted(async () => {
   }
 })
 
+/** 失活前再落盘一次，避免未触发 watch 时丢步骤 */
+onDeactivated(() => {
+  persistWizardState()
+})
+
 /** 从其他菜单返回时：刷新数据集列表；若带入新的 datasetId 则切换 */
 onActivated(async () => {
   try {
@@ -470,7 +499,7 @@ onUnmounted(() => {
   <section class="wizard" v-loading="loading">
     <div class="wizard-head">
       <div>
-        <h2>检测训练向导</h2>
+        <h2>{{ wizardTitle }}向导</h2>
         <p>
           当前数据集：
           <strong>{{ current?.name || '未选择' }}</strong>
@@ -620,6 +649,7 @@ onUnmounted(() => {
         v-else-if="active === 2 && currentId"
         ref="annotatePanelRef"
         :dataset-id="currentId"
+        :task-type="taskType"
         @back="goStep(1)"
         @next="goStep(3)"
       />
@@ -631,6 +661,7 @@ onUnmounted(() => {
         :dataset-id="currentId"
         :dataset-name="current.name"
         :image-count="current.active_count ?? current.image_count"
+        :task-type="taskType"
         @update:step="goStep"
       />
     </div>

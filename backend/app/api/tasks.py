@@ -36,6 +36,11 @@ def _parse_json(raw: str) -> dict:
         return {}
 
 
+def _task_type(db: Session, task: TrainTask) -> str:
+    """从关联数据集解析任务类型（detect / segment），默认 detect。"""
+    ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
+    return (ds.task_type if ds and ds.task_type else None) or "detect"
+
 def _task_out(task: TrainTask) -> TaskOut:
     cfg = _parse_json(task.config_json)
     # 读出时清洗历史占位权重名，避免前端下拉仍显示无效值
@@ -105,6 +110,8 @@ def create_task(body: TaskCreate, user: User = Depends(get_current_user), db: Se
         raise HTTPException(status_code=400, detail={"code": "bad_name", "message": str(e)}) from e
 
     _get_dataset(db, body.dataset_id, user)
+    ds = db.query(Dataset).filter(Dataset.id == body.dataset_id).first()
+    task_type = (ds.task_type if ds else None) or "detect"
     exists = (
         db.query(TrainTask)
         .filter(TrainTask.name == name, TrainTask.owner_id == user.id)
@@ -113,7 +120,7 @@ def create_task(body: TaskCreate, user: User = Depends(get_current_user), db: Se
     if exists:
         raise HTTPException(status_code=400, detail={"code": "exists", "message": "您已有同名训练任务"})
 
-    task_storage.ensure_task_dirs(user.username, name)
+    task_storage.ensure_task_dirs(user.username, name, task_type)
     cfg = TrainConfig().model_dump()
     task = TrainTask(
         name=name,
@@ -261,7 +268,15 @@ def task_ai_advice(task_id: int, user: User = Depends(get_current_user), db: Ses
     task.metrics_json = json.dumps(metrics, ensure_ascii=False)
 
     # 同步刷新 HTML 报告，便于下载包含 AI 建议
-    report_dir = task_storage.reports_dir(username_by_id(db, task.owner_id), task.name)
+    tt = _task_type(db, task)
+    run_key = task_storage.resolve_run_key(task_name=task.name, model_path=task.model_path)
+    # metrics 里若已有 run_key 优先（与本轮评估一致）
+    mk = str(metrics.get("run_key") or "").strip()
+    if mk:
+        run_key = mk
+    report_dir = task_storage.versioned_reports_dir(
+        username_by_id(db, task.owner_id), task.name, run_key, tt
+    )
     write_eval_reports(task.name, metrics, report_dir)
     db.commit()
     db.refresh(task)
@@ -362,20 +377,31 @@ def download_artifact(
         return FileResponse(path, filename=path.name)
 
     if kind == "report":
-        report_dir = task_storage.reports_dir(username_by_id(db, task.owner_id), task.name)
+        tt = _task_type(db, task)
+        username = username_by_id(db, task.owner_id)
+        run_key = task_storage.resolve_run_key(task_name=task.name, model_path=task.model_path)
+        metrics_preview = _parse_json(task.metrics_json)
+        if str(metrics_preview.get("run_key") or "").strip():
+            run_key = str(metrics_preview.get("run_key")).strip()
+        report_dir = task_storage.versioned_reports_dir(username, task.name, run_key, tt)
+        # 兼容旧版扁平报告
+        legacy_report_dir = task_storage.reports_dir(username, task.name, tt)
         file_name = name or "eval_report.html"
-        path = report_dir / Path(file_name).name
+        try:
+            path = task_storage.safe_join_under(report_dir, Path(file_name).name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail={"code": "bad_name", "message": str(e)}) from e
         # 下载前按最新 metrics（含 AI 建议）重写 HTML
         if path.suffix.lower() in {".html", ".htm"} or file_name == "eval_report.html":
             metrics = _parse_json(task.metrics_json)
-            # 若磁盘 JSON 有更新字段也合并
             json_path = report_dir / "eval_report.json"
+            if not json_path.exists():
+                json_path = legacy_report_dir / "eval_report.json"
             if json_path.exists():
                 try:
                     disk = json.loads(json_path.read_text(encoding="utf-8"))
                     if isinstance(disk, dict):
                         merged = {**disk, **metrics}
-                        # AI 建议以任务 metrics 为准（更新）
                         if metrics.get("ai_advice"):
                             merged["ai_advice"] = metrics["ai_advice"]
                             merged["ai_advice_source"] = metrics.get("ai_advice_source")
@@ -385,15 +411,38 @@ def download_artifact(
             write_eval_reports(task.name, metrics, report_dir)
             path = report_dir / "eval_report.html"
         if not path.exists():
-            raise HTTPException(status_code=404, detail={"code": "not_found", "message": "报告不存在"})
+            legacy = legacy_report_dir / Path(file_name).name
+            if legacy.exists():
+                path = legacy
+            else:
+                raise HTTPException(status_code=404, detail={"code": "not_found", "message": "报告不存在"})
         return FileResponse(path, filename=path.name)
 
     if kind == "export":
-        export_dir = task_storage.exports_dir(username_by_id(db, task.owner_id), task.name)
+        tt = _task_type(db, task)
+        username = username_by_id(db, task.owner_id)
+        export_root = task_storage.exports_dir(username, task.name, tt)
         if not name:
             raise HTTPException(status_code=400, detail={"code": "bad_request", "message": "请指定文件名"})
-        path = export_dir / Path(name).name
-        if not path.exists():
+        # 新版：run_key/filename；旧版：扁平 filename
+        path: Path | None = None
+        try:
+            path = task_storage.safe_join_under(export_root, name)
+        except ValueError:
+            path = None
+        if path is None or not path.is_file():
+            flat = export_root / Path(name).name
+            if flat.is_file():
+                path = flat
+            else:
+                # 再试：任意版本子目录下的同名文件（取最近修改）
+                matches = sorted(
+                    export_root.glob(f"*/{Path(name).name}"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                path = matches[0] if matches else None
+        if not path or not path.is_file():
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": "导出文件不存在"})
         return FileResponse(path, filename=path.name)
 

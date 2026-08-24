@@ -134,21 +134,27 @@ def _register_model(
     model_name: str | None = None,
 ) -> str:
     """
-    每次训练新增一条模型库记录；权重复制到独立归档路径。
-    返回最终模型名。
+    每次训练新增一条模型库记录；权重复制到独立归档路径：
+    models/<tt>/<user>/<task_name>/<run_key>/<run_key>.pt
     """
     from app.services import model_artifacts
 
     username = username_by_id(db, task.owner_id)
-    dest_dir = task_storage.saved_models_dir(username, task_type)
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    stems = task_storage.collect_archived_model_stems(username, task.name, task_type)
     name = model_name or model_artifacts.next_unique_model_name(
-        db, task.owner_id, task.name, archive_dir=dest_dir
+        db, task.owner_id, task.name, archived_stems=stems
     )
+    dest_dir = task_storage.versioned_model_dir(username, task.name, name, task_type)
+    dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{name}.pt"
     # 若目标已存在则再顺延，避免覆盖
     if dest.exists():
-        name = model_artifacts.next_unique_model_name(db, task.owner_id, task.name, archive_dir=dest_dir)
+        stems.add(name)
+        name = model_artifacts.next_unique_model_name(
+            db, task.owner_id, task.name, archived_stems=stems
+        )
+        dest_dir = task_storage.versioned_model_dir(username, task.name, name, task_type)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{name}.pt"
     shutil.copy2(weights_best, dest)
     payload = json.dumps(metrics, ensure_ascii=False)
@@ -186,9 +192,13 @@ def _local_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
     # 开训前占用唯一模型名，训练输出与归档都用该名，避免互相覆盖
     from app.services import model_artifacts
 
-    archive_dir = task_storage.saved_models_dir(username, task_type)
+    archive_dir = task_storage.saved_models_task_dir(username, task.name, task_type)
     model_name = model_artifacts.next_unique_model_name(
-        db, task.owner_id, task.name, archive_dir=archive_dir
+        db,
+        task.owner_id,
+        task.name,
+        archive_dir=archive_dir,
+        archived_stems=task_storage.collect_archived_model_stems(username, task.name, task_type),
     )
     runs = dirs["runs"] / model_name
     runs.mkdir(parents=True, exist_ok=True)
@@ -372,7 +382,13 @@ def _local_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
     best_map = history[-1]["map50"] if history else 0
     best_loss = history[-1]["loss"] if history else 0
     task.metrics_json = json.dumps(
-        {"best_map50": best_map, "history": history, "epochs": epochs, "demo": False},
+        {
+            "best_map50": best_map,
+            "history": history,
+            "epochs": epochs,
+            "demo": False,
+            "run_key": model_name,
+        },
         ensure_ascii=False,
     )
     _register_model(
@@ -465,9 +481,13 @@ def _local_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     data_yaml = _dataset_yaml(db, task)
     ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
     task_type = (ds.task_type if ds else None) or "detect"
-    dirs = task_storage.ensure_task_dirs(
-        username_by_id(db, task.owner_id), task.name, task_type
-    )
+    username = username_by_id(db, task.owner_id)
+    dirs = task_storage.ensure_task_dirs(username, task.name, task_type)
+    run_key = task_storage.resolve_run_key(task_name=task.name, model_path=task.model_path)
+    report_dir = task_storage.versioned_reports_dir(username, task.name, run_key, task_type)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    val_project = dirs["runs"] / run_key
+    val_project.mkdir(parents=True, exist_ok=True)
 
     job.progress = 10
     job.message = "评估中…"
@@ -480,12 +500,12 @@ def _local_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         return
 
     model = YOLO(task.model_path)
-    # 写入任务 runs 目录，避免污染 backend/runs/detect/val*
+    # 写入本轮 runs/<run_key>/val，避免多次评估互相覆盖、也避免污染 backend/runs
     res = model.val(
         data=str(data_yaml),
         plots=False,
         verbose=False,
-        project=str(dirs["runs"]),
+        project=str(val_project),
         name="val",
         exist_ok=True,
     )
@@ -501,6 +521,7 @@ def _local_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         "precision": round(precision, 4),
         "recall": round(recall, 4),
         "demo": False,
+        "run_key": run_key,
         "suggestion": "真实评估完成。可结合 AI 优化建议调整数据量与超参后再次训练。",
     }
     prev: dict[str, Any] = {}
@@ -516,8 +537,9 @@ def _local_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     if prev.get("history"):
         metrics["history"] = prev["history"]
 
-    report_json, report_html = write_eval_reports(task.name, metrics, dirs["reports"])
+    report_json, report_html = write_eval_reports(task.name, metrics, report_dir)
     prev.update(metrics)
+    prev["run_key"] = run_key
     task.metrics_json = json.dumps(prev, ensure_ascii=False)
     task.status = "evaluated"
     task.step = max(task.step, 6)
@@ -530,6 +552,7 @@ def _local_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
             "metrics": metrics,
             "report_json": str(report_json),
             "report_html": str(report_html),
+            "run_key": run_key,
             "demo": False,
         },
         ensure_ascii=False,
@@ -539,12 +562,22 @@ def _local_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
 
 def _local_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     YOLO = _require_ultralytics()
-    if not task.model_path or not Path(task.model_path).is_file():
+    # 模型库按卡片导出时可指定 model_path / run_key，避免误用任务上最新训练路径
+    src_model = str(payload.get("model_path") or task.model_path or "").strip()
+    if not src_model or not Path(src_model).is_file():
         raise FileNotFoundError("请先完成训练并生成 best.pt")
     formats = payload.get("formats") or ["pt", "onnx"]
-    dirs = task_storage.ensure_task_dirs(username_by_id(db, task.owner_id), task.name)
-    export_dir = dirs["exports"]
-    model = YOLO(task.model_path)
+    ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
+    task_type = (ds.task_type if ds else None) or "detect"
+    username = username_by_id(db, task.owner_id)
+    task_storage.ensure_task_dirs(username, task.name, task_type)
+    run_key = str(payload.get("run_key") or "").strip() or task_storage.resolve_run_key(
+        task_name=task.name, model_path=src_model
+    )
+    export_dir = task_storage.versioned_exports_dir(username, task.name, run_key, task_type)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    side_by_side = bool(payload.get("side_by_side"))
+    model = YOLO(src_model)
     files: list[dict[str, Any]] = []
     total = max(len(formats), 1)
 
@@ -560,9 +593,12 @@ def _local_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> Non
 
         fmt_l = str(fmt).lower()
         if fmt_l == "pt":
-            out = export_dir / f"{task.name}.pt"
-            shutil.copy2(task.model_path, out)
-            files.append({"format": "pt", "path": str(out), "name": out.name, "demo": False})
+            out = export_dir / f"{run_key}.pt"
+            shutil.copy2(src_model, out)
+            rel_name = f"{run_key}/{out.name}"
+            files.append(
+                {"format": "pt", "path": str(out), "name": rel_name, "demo": False, "run_key": run_key}
+            )
         elif fmt_l == "onnx":
             try:
                 import onnx  # noqa: F401
@@ -573,17 +609,33 @@ def _local_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> Non
                 ) from e
             exported = model.export(format="onnx", imgsz=int(_parse_config(task).get("imgsz") or 640))
             src = Path(str(exported))
-            out = export_dir / f"{task.name}.onnx"
+            out = export_dir / f"{run_key}.onnx"
             if src.is_file():
                 shutil.copy2(src, out)
             else:
-                # 有时导出路径在权重同目录
-                cand = Path(task.model_path).with_suffix(".onnx")
+                cand = Path(src_model).with_suffix(".onnx")
                 if cand.is_file():
                     shutil.copy2(cand, out)
                 else:
                     raise FileNotFoundError("ONNX 导出失败：未找到输出文件")
-            files.append({"format": "onnx", "path": str(out), "name": out.name, "demo": False})
+            # 模型库旁路：与归档 PT 同目录再放一份，便于 has_onnx / 下载直达
+            if side_by_side:
+                side = Path(src_model).with_suffix(".onnx")
+                try:
+                    if side.resolve() != out.resolve():
+                        shutil.copy2(out, side)
+                except OSError:
+                    pass
+            rel_name = f"{run_key}/{out.name}"
+            files.append(
+                {
+                    "format": "onnx",
+                    "path": str(out),
+                    "name": rel_name,
+                    "demo": False,
+                    "run_key": run_key,
+                }
+            )
         else:
             raise ValueError(f"不支持的导出格式：{fmt}")
 
@@ -595,7 +647,9 @@ def _local_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> Non
     job.status = "completed"
     job.progress = 100
     job.message = "本机导出完成"
-    job.result_json = json.dumps({"files": files, "demo": False}, ensure_ascii=False)
+    job.result_json = json.dumps(
+        {"files": files, "demo": False, "run_key": run_key}, ensure_ascii=False
+    )
     db.commit()
 
 

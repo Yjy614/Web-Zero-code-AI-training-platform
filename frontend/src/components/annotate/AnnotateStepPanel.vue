@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
- * 标注步骤面板（检测：矩形框）。
- * 后期实例分割可复用本面板布局，替换内部画布为多边形标注组件。
+ * 标注步骤面板：检测矩形框 / 分割连点多边形。
+ * 分割预标注二期再做（SAM + AI 短训）。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BBoxAnnotatorCanvas from '@/components/annotate/BBoxAnnotatorCanvas.vue'
+import PolygonAnnotatorCanvas from '@/components/annotate/PolygonAnnotatorCanvas.vue'
 import { cancelJob, getJob } from '@/api/tasks'
 import {
   fetchImageObjectUrl,
@@ -19,17 +20,23 @@ import {
   startPrelabel,
   type BBox,
   type ImageItem,
+  type PolygonInstance,
   type PrelabelStatus,
 } from '@/api/datasets'
+import { classAccent } from '@/utils/classColors'
+import type { WizardTaskType } from '@/composables/useWizardSteps'
 
 const props = defineProps<{
   datasetId: number
+  taskType?: WizardTaskType
 }>()
 
 const emit = defineEmits<{
   back: []
   next: []
 }>()
+
+const isSegment = computed(() => props.taskType === 'segment')
 
 const loading = ref(false)
 const images = ref<ImageItem[]>([])
@@ -38,11 +45,12 @@ const newClass = ref('')
 const currentClassId = ref(0)
 const imageIndex = ref(0)
 const boxes = ref<BBox[]>([])
+const polygons = ref<PolygonInstance[]>([])
 const imageUrl = ref('')
 let objectUrlToRevoke: string | null = null
 let navigating = false
 
-/** AI 预标注 */
+/** AI 预标注（仅检测） */
 const prelabelInfo = ref<PrelabelStatus | null>(null)
 const prelabelRunning = ref(false)
 const prelabelProgress = ref(0)
@@ -52,11 +60,20 @@ let prelabelPollTimer: number | null = null
 
 const activeImages = computed(() => images.value.filter((i) => i.status === 'active'))
 const currentImage = computed(() => activeImages.value[imageIndex.value] || null)
-const canPrelabel = computed(() => Boolean(prelabelInfo.value?.can_prelabel) && !prelabelRunning.value)
+const canPrelabel = computed(
+  () =>
+    !isSegment.value &&
+    Boolean(prelabelInfo.value?.can_prelabel) &&
+    !prelabelRunning.value,
+)
 const canRevertPrelabel = computed(
-  () => Boolean(prelabelInfo.value?.last_written?.length) && !prelabelRunning.value,
+  () =>
+    !isSegment.value &&
+    Boolean(prelabelInfo.value?.last_written?.length) &&
+    !prelabelRunning.value,
 )
 const prelabelHint = computed(() => {
+  if (isSegment.value) return '实例分割预标注将在二期开放（SAM + AI 短训）'
   if (prelabelRunning.value) return '预标注进行中，请稍候…'
   return prelabelInfo.value?.block_reason || ''
 })
@@ -76,6 +93,10 @@ function stopPrelabelPoll() {
 }
 
 async function refreshPrelabelStatus() {
+  if (isSegment.value) {
+    prelabelInfo.value = null
+    return
+  }
   const { data } = await getPrelabelStatus(props.datasetId)
   prelabelInfo.value = data
   if (data.running_job_id && !prelabelRunning.value) {
@@ -97,24 +118,56 @@ async function loadClasses() {
   if (currentClassId.value >= classes.value.length) {
     currentClassId.value = Math.max(0, classes.value.length - 1)
   }
+  // 清理历史遗留：类别已删但标注文件里仍残留越界 class_id（如「类5」）
+  try {
+    await putClasses(props.datasetId, classes.value, [])
+  } catch {
+    // 清理失败不阻断标注页
+  }
 }
 
 async function loadCurrentAnnotation() {
-  revokeUrl()
-  imageUrl.value = ''
   boxes.value = []
-  if (!currentImage.value) return
+  polygons.value = []
+  if (!currentImage.value) {
+    revokeUrl()
+    imageUrl.value = ''
+    return
+  }
   const name = currentImage.value.name
-  const url = await fetchImageObjectUrl(props.datasetId, name)
+  let url = ''
+  try {
+    url = await fetchImageObjectUrl(props.datasetId, name)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : `图片加载失败：${name}`
+    ElMessage.error(msg)
+    return
+  }
+  // 先切换到新 URL，再释放旧 URL，避免画布加载中途 blob 被吊销
+  const prev = objectUrlToRevoke
   objectUrlToRevoke = url
   imageUrl.value = url
-  const { data } = await getAnnotation(props.datasetId, name)
-  boxes.value = data.boxes
+  if (prev && prev !== url) URL.revokeObjectURL(prev)
+
+  try {
+    const { data } = await getAnnotation(props.datasetId, name)
+    boxes.value = data.boxes || []
+    polygons.value = data.polygons || []
+  } catch {
+    boxes.value = []
+    polygons.value = []
+  }
 }
 
 async function saveAnnotation(showToast = true) {
   if (!currentImage.value || prelabelRunning.value) return
-  await putAnnotation(props.datasetId, currentImage.value.name, boxes.value)
+  if (isSegment.value) {
+    await putAnnotation(props.datasetId, currentImage.value.name, {
+      polygons: polygons.value,
+    })
+  } else {
+    await putAnnotation(props.datasetId, currentImage.value.name, { boxes: boxes.value })
+  }
   if (showToast) ElMessage.success('标注已保存')
   await refreshImages()
   await refreshPrelabelStatus()
@@ -242,15 +295,35 @@ async function addClass() {
 
 async function removeClass(idx: number) {
   if (prelabelRunning.value) return
+  const name = classes.value[idx] || `类${idx}`
   try {
-    await ElMessageBox.confirm('删除类别后，已有标注的内容不会自动更新，确认删除？', '提示')
+    await ElMessageBox.confirm(
+      `删除类别「${name}」后，将同时删除所有图片中该类别的标注，且更大编号的类别会自动前移。确认删除？`,
+      '删除类别',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
   } catch {
     return
   }
-  classes.value = classes.value.filter((_, i) => i !== idx)
-  await putClasses(props.datasetId, classes.value)
-  currentClassId.value = Math.min(currentClassId.value, Math.max(0, classes.value.length - 1))
+  const next = classes.value.filter((_, i) => i !== idx)
+  const { data } = await putClasses(props.datasetId, next, [idx])
+  classes.value = data.classes || next
+  if (currentClassId.value === idx) {
+    currentClassId.value = Math.max(0, classes.value.length - 1)
+  } else if (currentClassId.value > idx) {
+    currentClassId.value -= 1
+  } else {
+    currentClassId.value = Math.min(currentClassId.value, Math.max(0, classes.value.length - 1))
+  }
+  await loadCurrentAnnotation()
+  await refreshImages()
   await refreshPrelabelStatus()
+  const purged = data.purge?.annotations_removed ?? 0
+  if (purged > 0) {
+    ElMessage.success(`类别已删除，并清除 ${purged} 条对应标注`)
+  } else {
+    ElMessage.success('类别已删除')
+  }
 }
 
 async function pollPrelabelJob(jobId: number) {
@@ -282,6 +355,10 @@ async function pollPrelabelJob(jobId: number) {
 }
 
 async function onPrelabel() {
+  if (isSegment.value) {
+    ElMessage.info('实例分割预标注将在二期开放')
+    return
+  }
   if (!canPrelabel.value) {
     ElMessage.warning(prelabelHint.value || '当前无法预标注')
     return
@@ -303,7 +380,7 @@ async function onPrelabel() {
   try {
     // 此时已锁屏，需绕过 flushSave 的 running 守卫强制落盘
     if (currentImage.value) {
-      await putAnnotation(props.datasetId, currentImage.value.name, boxes.value)
+      await putAnnotation(props.datasetId, currentImage.value.name, { boxes: boxes.value })
     }
     const { data } = await startPrelabel(props.datasetId)
     prelabelJobId.value = data.id
@@ -388,13 +465,22 @@ defineExpose({ flushSave })
   <div class="step-body annotate" v-loading="loading">
     <h3>步骤 3 · 标注</h3>
     <p class="muted intro">
-      可先手工标注部分图片，再使用 AI 预标注自动补全剩余图片（结果请人工复核）。切换图片或进入下一步时会自动保存标注。训练成功后，本轮预标注将自动视为用户标注，「清除本轮 AI 预标注」将不再可用。
+      <template v-if="isSegment">
+        使用连点多边形标注实例轮廓。单击加点，双击或 Enter
+        闭合。切换图片或进入下一步时会自动保存。预标注（SAM / AI 短训）将在后续版本开放。
+      </template>
+      <template v-else>
+        可先手工标注部分图片，再使用 AI 预标注自动补全剩余图片（结果请人工复核）。切换图片或进入下一步时会自动保存标注。训练成功后，本轮预标注将自动视为用户标注，「清除本轮
+        AI 预标注」将不再可用。
+      </template>
     </p>
     <div class="annotate-layout" :class="{ locked: prelabelRunning }">
       <aside class="side">
         <div class="class-box">
           <strong>类别</strong>
-          <p v-if="!classes.length" class="muted class-hint">暂无类别，请先添加后再画框标注</p>
+          <p v-if="!classes.length" class="muted class-hint">
+            暂无类别，请先添加后再{{ isSegment ? '画多边形' : '画框' }}标注
+          </p>
           <div class="class-list">
             <button
               v-for="(c, i) in classes"
@@ -405,7 +491,10 @@ defineExpose({ flushSave })
               :disabled="prelabelRunning"
               @click="currentClassId = i"
             >
-              <span>{{ c }}</span>
+              <span class="class-label">
+                <i class="class-swatch" :style="{ background: classAccent(i) }" aria-hidden="true" />
+                {{ c }}
+              </span>
               <em @click.stop="removeClass(i)">删</em>
             </button>
           </div>
@@ -457,6 +546,7 @@ defineExpose({ flushSave })
               <template v-if="unlabeledIndices.length">（{{ unlabeledIndices.length }}）</template>
             </el-button>
             <el-button
+              v-if="!isSegment"
               type="warning"
               plain
               :disabled="!canPrelabel"
@@ -465,10 +555,16 @@ defineExpose({ flushSave })
             >
               AI 预标注
             </el-button>
-            <el-button plain :disabled="!canRevertPrelabel" @click="onRevertPrelabel">
+            <el-button
+              v-if="!isSegment"
+              plain
+              :disabled="!canRevertPrelabel"
+              @click="onRevertPrelabel"
+            >
               清除本轮 AI 预标注
             </el-button>
-            <p v-if="prelabelHint && !prelabelRunning" class="muted prelabel-tip">{{ prelabelHint }}</p>
+            <p v-if="isSegment" class="muted prelabel-tip">{{ prelabelHint }}</p>
+            <p v-else-if="prelabelHint && !prelabelRunning" class="muted prelabel-tip">{{ prelabelHint }}</p>
             <p v-else-if="prelabelInfo && !prelabelRunning" class="muted prelabel-tip">
               已标注 {{ prelabelInfo.labeled_count }} · 未标注 {{ prelabelInfo.unlabeled_count }}
               （需 ≥{{ prelabelInfo.min_labeled }} 张已标注）
@@ -482,8 +578,19 @@ defineExpose({ flushSave })
       </aside>
       <div class="canvas-wrap">
         <div class="canvas-fill">
+          <PolygonAnnotatorCanvas
+            v-if="isSegment && imageUrl && !prelabelRunning"
+            :key="`seg-${datasetId}-${currentImage?.name || ''}`"
+            :image-url="imageUrl"
+            :polygons="polygons"
+            :class-id="currentClassId"
+            :classes="classes"
+            @update:polygons="polygons = $event"
+            @navigate="onNavigate"
+          />
           <BBoxAnnotatorCanvas
-            v-if="imageUrl && !prelabelRunning"
+            v-else-if="!isSegment && imageUrl && !prelabelRunning"
+            :key="`det-${datasetId}-${currentImage?.name || ''}`"
             :image-url="imageUrl"
             :boxes="boxes"
             :class-id="currentClassId"
@@ -570,6 +677,19 @@ defineExpose({ flushSave })
   border-color: var(--brand);
   background: var(--brand-mist);
 }
+.class-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+.class-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
 .class-item em {
   font-style: normal;
   color: var(--ink-faint);
@@ -635,6 +755,7 @@ defineExpose({ flushSave })
   /* 高度跟随左侧：自身不参与撑高，内容绝对填满拉伸后的高度 */
   flex: 1;
   min-width: 0;
+  min-height: 420px;
   position: relative;
 }
 .canvas-fill {
@@ -643,6 +764,8 @@ defineExpose({ flushSave })
   overflow: auto;
   display: flex;
   flex-direction: column;
+  min-height: 420px;
+  background: #f3f5f7;
 }
 .canvas-fill :deep(.annotator) {
   flex: 1;

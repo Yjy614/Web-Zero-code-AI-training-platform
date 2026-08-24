@@ -19,6 +19,14 @@ from app.services.bootstrap import username_by_id
 from app.services.runtime_settings import is_demo_mode
 
 
+def _task_type(db, task: TrainTask) -> str:
+    """从关联数据集解析任务类型。"""
+    if not task.dataset_id:
+        return "detect"
+    ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
+    return (ds.task_type if ds else None) or "detect"
+
+
 class MockJobRunner(JobRunner):
     """演示用 Mock：假进度 + 假曲线 + 占位产物，不占 GPU。"""
 
@@ -110,12 +118,20 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     # 演示时长控制在约 8~25 秒，不因 epochs 过大拖太久
     sleep_s = min(0.8, max(0.12, 18.0 / steps))
     history: list[dict] = []
-    dirs = task_storage.ensure_task_dirs(username_by_id(db, task.owner_id), task.name)
+    task_type = _task_type(db, task)
+    dirs = task_storage.ensure_task_dirs(
+        username_by_id(db, task.owner_id), task.name, task_type
+    )
     from app.services import model_artifacts
 
-    archive_dir = task_storage.saved_models_dir(username_by_id(db, task.owner_id), "detect")
+    username = username_by_id(db, task.owner_id)
+    archive_dir = task_storage.saved_models_task_dir(username, task.name, task_type)
     model_name = model_artifacts.next_unique_model_name(
-        db, task.owner_id, task.name, archive_dir=archive_dir
+        db,
+        task.owner_id,
+        task.name,
+        archive_dir=archive_dir,
+        archived_stems=task_storage.collect_archived_model_stems(username, task.name, task_type),
     )
     run_dir = dirs["runs"] / model_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -150,21 +166,29 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     task.status = "trained"
     task.step = max(task.step, 5)
     task.metrics_json = json.dumps(
-        {"best_map50": history[-1]["map50"] if history else 0, "history": history, "epochs": steps},
+        {
+            "best_map50": history[-1]["map50"] if history else 0,
+            "history": history,
+            "epochs": steps,
+            "run_key": model_name,
+        },
         ensure_ascii=False,
     )
 
-    # 登记模型库（每次训练新增，名称冲突用 _2、_3…）
+    # 登记模型库（每次训练新增；归档到 models/<tt>/<user>/<task>/<run_key>/）
     from app.services import model_artifacts
 
-    username = username_by_id(db, task.owner_id)
-    dest_dir = task_storage.saved_models_dir(username, "detect")
+    dest_dir = task_storage.versioned_model_dir(username, task.name, model_name, task_type)
     dest_dir.mkdir(parents=True, exist_ok=True)
     archived = dest_dir / f"{model_name}.pt"
     if archived.exists():
+        stems = task_storage.collect_archived_model_stems(username, task.name, task_type)
+        stems.add(model_name)
         model_name = model_artifacts.next_unique_model_name(
-            db, task.owner_id, task.name, archive_dir=dest_dir
+            db, task.owner_id, task.name, archived_stems=stems
         )
+        dest_dir = task_storage.versioned_model_dir(username, task.name, model_name, task_type)
+        dest_dir.mkdir(parents=True, exist_ok=True)
         archived = dest_dir / f"{model_name}.pt"
     archived.write_bytes(weights_best.read_bytes())
     metrics = {
@@ -177,7 +201,7 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         ModelRecord(
             name=model_name,
             path=str(archived),
-            task_type="detect",
+            task_type=task_type,
             owner_id=task.owner_id,
             task_id=task.id,
             metrics_json=json.dumps(metrics, ensure_ascii=False),
@@ -213,8 +237,12 @@ def _commit_prelabel_after_train(db, task: TrainTask) -> None:
 def _mock_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     import time
 
-    dirs = task_storage.ensure_task_dirs(username_by_id(db, task.owner_id), task.name)
-    report_dir = dirs["reports"]
+    task_type = _task_type(db, task)
+    username = username_by_id(db, task.owner_id)
+    task_storage.ensure_task_dirs(username, task.name, task_type)
+    run_key = task_storage.resolve_run_key(task_name=task.name, model_path=task.model_path)
+    report_dir = task_storage.versioned_reports_dir(username, task.name, run_key, task_type)
+    report_dir.mkdir(parents=True, exist_ok=True)
     for i in range(1, 11):
         if _cancelled(job.id):
             job.status = "cancelled"
@@ -232,6 +260,7 @@ def _mock_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         "precision": 0.88,
         "recall": 0.83,
         "demo": True,
+        "run_key": run_key,
         "suggestion": "演示模式建议：增加难例样本、检查标注一致性，真实训练请关闭演示模式并配置集群。",
     }
     prev = {}
@@ -251,6 +280,7 @@ def _mock_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     task.status = "evaluated"
     task.step = max(task.step, 6)
     prev.update(metrics)
+    prev["run_key"] = run_key
     task.metrics_json = json.dumps(prev, ensure_ascii=False)
 
     job.status = "completed"
@@ -261,6 +291,7 @@ def _mock_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
             "metrics": metrics,
             "report_json": str(report_json),
             "report_html": str(report_html),
+            "run_key": run_key,
             "demo": True,
         },
         ensure_ascii=False,
@@ -272,8 +303,16 @@ def _mock_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
     import time
 
     formats = payload.get("formats") or ["pt", "onnx"]
-    dirs = task_storage.ensure_task_dirs(username_by_id(db, task.owner_id), task.name)
-    export_dir = dirs["exports"]
+    task_type = _task_type(db, task)
+    username = username_by_id(db, task.owner_id)
+    task_storage.ensure_task_dirs(username, task.name, task_type)
+    src_model = str(payload.get("model_path") or task.model_path or "").strip()
+    run_key = str(payload.get("run_key") or "").strip() or task_storage.resolve_run_key(
+        task_name=task.name, model_path=src_model or None
+    )
+    export_dir = task_storage.versioned_exports_dir(username, task.name, run_key, task_type)
+    export_dir.mkdir(parents=True, exist_ok=True)
+    side_by_side = bool(payload.get("side_by_side"))
     files = []
     total = max(len(formats), 1)
     for idx, fmt in enumerate(formats, start=1):
@@ -283,9 +322,26 @@ def _mock_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
             db.commit()
             return
         time.sleep(0.5)
-        out = export_dir / f"{task.name}_demo.{fmt}"
+        out = export_dir / f"{run_key}_demo.{fmt}"
         out.write_bytes(f"MOCK_EXPORT_{fmt.upper()}_DEMO\n".encode("utf-8"))
-        files.append({"format": fmt, "path": str(out), "name": out.name, "demo": True})
+        if side_by_side and src_model and Path(src_model).is_file():
+            side = Path(src_model).with_suffix(f".{fmt}" if fmt != "pt" else ".pt")
+            if fmt == "onnx":
+                side = Path(src_model).with_suffix(".onnx")
+                try:
+                    side.write_bytes(out.read_bytes())
+                except OSError:
+                    pass
+        rel_name = f"{run_key}/{out.name}"
+        files.append(
+            {
+                "format": fmt,
+                "path": str(out),
+                "name": rel_name,
+                "demo": True,
+                "run_key": run_key,
+            }
+        )
         job.progress = round(idx / total * 100, 1)
         job.message = f"正在导出 {fmt}"
         db.commit()
@@ -295,7 +351,9 @@ def _mock_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
     job.status = "completed"
     job.progress = 100
     job.message = "Mock 导出完成（演示文件）"
-    job.result_json = json.dumps({"files": files, "demo": True}, ensure_ascii=False)
+    job.result_json = json.dumps(
+        {"files": files, "demo": True, "run_key": run_key}, ensure_ascii=False
+    )
     db.commit()
 
 

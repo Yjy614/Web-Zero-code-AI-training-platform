@@ -30,6 +30,22 @@ export interface BBox {
   height: number
 }
 
+export interface PolygonPoint {
+  x: number
+  y: number
+}
+
+export interface PolygonInstance {
+  class_id: number
+  points: PolygonPoint[]
+}
+
+export interface AnnotationData {
+  image: string
+  boxes: BBox[]
+  polygons: PolygonInstance[]
+}
+
 export interface CleanResult {
   kept: number
   removed: number
@@ -41,8 +57,8 @@ export function listDatasets(taskType = 'detect') {
   return http.get<DatasetItem[]>('/datasets', { params: { task_type: taskType } })
 }
 
-export function createDataset(name: string) {
-  return http.post<DatasetItem>('/datasets', { name })
+export function createDataset(name: string, taskType = 'detect') {
+  return http.post<DatasetItem>('/datasets', { name, task_type: taskType })
 }
 
 export function getDataset(id: number) {
@@ -146,21 +162,26 @@ export function getClasses(id: number) {
   return http.get<{ classes: string[] }>(`/datasets/${id}/classes`)
 }
 
-export function putClasses(id: number, classes: string[]) {
-  return http.put<{ classes: string[] }>(`/datasets/${id}/classes`, { classes })
+export function putClasses(id: number, classes: string[], removedIndices: number[] = []) {
+  return http.put<{ classes: string[]; purge?: { files_touched: number; annotations_removed: number } }>(
+    `/datasets/${id}/classes`,
+    { classes, removed_indices: removedIndices },
+  )
 }
 
 export function getAnnotation(id: number, image: string) {
-  return http.get<{ image: string; boxes: BBox[] }>(
-    `/datasets/${id}/annotations/${encodeURIComponent(image)}`,
-  )
+  return http.get<AnnotationData>(`/datasets/${id}/annotations/${encodeURIComponent(image)}`)
 }
 
-export function putAnnotation(id: number, image: string, boxes: BBox[]) {
-  return http.put<{ image: string; boxes: BBox[] }>(
-    `/datasets/${id}/annotations/${encodeURIComponent(image)}`,
-    { boxes },
-  )
+export function putAnnotation(
+  id: number,
+  image: string,
+  payload: { boxes?: BBox[]; polygons?: PolygonInstance[] },
+) {
+  return http.put<AnnotationData>(`/datasets/${id}/annotations/${encodeURIComponent(image)}`, {
+    boxes: payload.boxes || [],
+    polygons: payload.polygons || [],
+  })
 }
 
 /** 带鉴权拉取图片并转为 Object URL。 */
@@ -169,5 +190,34 @@ export async function fetchImageObjectUrl(id: number, image: string, removed = f
     params: { removed },
     responseType: 'blob',
   })
-  return URL.createObjectURL(res.data)
+  let blob = res.data as Blob
+  // 错误时后端可能返回 JSON，axios 仍当 blob
+  if (blob.type && /json|text/.test(blob.type)) {
+    let msg = '图片下载失败'
+    try {
+      const text = await blob.text()
+      const parsed = JSON.parse(text) as { detail?: { message?: string } | string }
+      if (typeof parsed.detail === 'string') msg = parsed.detail
+      else if (parsed.detail && typeof parsed.detail === 'object' && parsed.detail.message) {
+        msg = parsed.detail.message
+      }
+    } catch {
+      // ignore
+    }
+    throw new Error(msg)
+  }
+  // 部分环境 octet-stream 无法解码，按扩展名强制图片 MIME
+  if (!blob.type || blob.type === 'application/octet-stream') {
+    const ext = image.split('.').pop()?.toLowerCase() || 'jpg'
+    const mime =
+      ext === 'png'
+        ? 'image/png'
+        : ext === 'webp'
+          ? 'image/webp'
+          : ext === 'bmp'
+            ? 'image/bmp'
+            : 'image/jpeg'
+    blob = new Blob([blob], { type: mime })
+  }
+  return URL.createObjectURL(blob)
 }

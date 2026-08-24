@@ -14,8 +14,8 @@ from app.core.database import get_db
 from app.models.train import Job, ModelRecord, TrainTask
 from app.models.user import User
 from app.runners.mock_runner import get_runner
-from app.schemas.task import JobOut, ModelOut, WeightItem
-from app.services import model_artifacts, task_storage
+from app.schemas.task import JobOut, ModelOut, PredictOut, WeightItem
+from app.services import model_artifacts, model_infer, task_storage
 
 router = APIRouter(tags=["资源"])
 
@@ -90,7 +90,7 @@ def list_weight_task_types(user: User = Depends(get_current_user)) -> dict:
             {
                 "task_type": t,
                 "label": labels.get(t, t),
-                "enabled": t == "detect",  # 一期仅开放检测上传与选用
+                "enabled": True,
             }
             for t in task_storage.WEIGHT_TASK_TYPES
         ]
@@ -207,6 +207,11 @@ async def export_model_onnx(
             message="ONNX 已存在",
             result={"files": [{"format": "onnx", "name": existing.name}]},
         )
+
+    pt = model_artifacts.find_pt_path(row)
+    if not pt:
+        raise HTTPException(status_code=400, detail={"code": "no_pt", "message": "找不到 PT 权重，无法转 ONNX"})
+
     if not row.task_id:
         raise HTTPException(
             status_code=400,
@@ -215,15 +220,8 @@ async def export_model_onnx(
     task = db.query(TrainTask).filter(TrainTask.id == row.task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "关联训练任务不存在"})
-    if not task.model_path or not Path(task.model_path).is_file():
-        # 回退到模型库 path
-        pt = model_artifacts.find_pt_path(row)
-        if pt:
-            task.model_path = str(pt)
-            db.commit()
-        else:
-            raise HTTPException(status_code=400, detail={"code": "no_pt", "message": "找不到 PT 权重，无法转 ONNX"})
 
+    # 同任务若已有导出在跑：仍返回该 Job（前端会轮询）；真正导出用本模型 PT，见 payload
     running = (
         db.query(Job)
         .filter(Job.task_id == task.id, Job.type == "export", Job.status.in_(["pending", "running"]))
@@ -237,9 +235,66 @@ async def export_model_onnx(
     db.add(job)
     db.commit()
     db.refresh(job)
-    await get_runner().submit("export", {"job_id": job.id, "task_id": task.id, "formats": ["onnx"]})
+    # 必须带上本卡片对应的 PT / run_key，避免误用任务上「最新一次」训练路径
+    await get_runner().submit(
+        "export",
+        {
+            "job_id": job.id,
+            "task_id": task.id,
+            "formats": ["onnx"],
+            "model_path": str(pt),
+            "run_key": row.name,
+            "model_id": row.id,
+            "side_by_side": True,
+        },
+    )
     db.refresh(job)
     return _job_out(job)
+
+
+@router.post("/models/{model_id}/predict", response_model=PredictOut)
+async def predict_model(
+    model_id: int,
+    file: UploadFile = File(...),
+    conf: float = Form(0.25),
+    iou: float = Form(0.45),
+    imgsz: int = Form(640),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PredictOut:
+    """
+    推理试用：上传一张图片，用指定模型库权重做检测/分割，
+    返回可视化 JPEG（base64）与 detections 列表。
+    """
+    row = _get_accessible_model(db, model_id, user)
+    pt = model_artifacts.find_pt_path(row)
+    onnx = model_artifacts.find_onnx_path(db, row)
+    try:
+        weight, fmt = model_infer.resolve_infer_weight(pt=pt, onnx=onnx)
+    except model_infer.InferError as e:
+        raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message}) from e
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail={"code": "empty_file", "message": "请上传图片文件"})
+    # 简单大小限制（20MB）
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail={"code": "too_large", "message": "图片过大（上限 20MB）"})
+
+    try:
+        result = model_infer.run_predict(
+            weight,
+            content,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz,
+            task_type=row.task_type or "detect",
+            model_format=fmt,
+        )
+    except model_infer.InferError as e:
+        raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message}) from e
+
+    return PredictOut(**result)
 
 
 @router.delete("/models/{model_id}")

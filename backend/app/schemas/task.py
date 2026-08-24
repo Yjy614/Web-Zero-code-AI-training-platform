@@ -111,3 +111,29 @@ class ModelOut(BaseModel):
     # 是否有可下载的 .pt / .onnx
     has_pt: bool = False
     has_onnx: bool = False
+
+
+class DetectItemOut(BaseModel):
+    """单条检测/分割结果。"""
+
+    class_id: int
+    class_name: str
+    confidence: float
+    bbox_xyxy: list[float]
+    polygon: list[list[float]] | None = None
+
+
+class PredictOut(BaseModel):
+    """模型推理试用结果。"""
+
+    task_type: str
+    model_format: str
+    count: int
+    detections: list[DetectItemOut] = Field(default_factory=list)
+    image_base64: str
+    image_mime: str = "image/jpeg"
+    width: int
+    height: int
+    conf: float
+    iou: float
+    imgsz: int

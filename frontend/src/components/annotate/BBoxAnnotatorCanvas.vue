@@ -5,6 +5,7 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { BBox } from '@/api/datasets'
+import { classAccent } from '@/utils/classColors'
 
 const props = defineProps<{
   imageUrl: string
@@ -84,10 +85,19 @@ function draw() {
   props.boxes.forEach((b, i) => {
     const { x, y, bw, bh } = yoloToPixel(b)
     const isSel = i === selected.value
-    const accent = isSel ? '#c4473a' : '#3d9b8f'
+    const accent = classAccent(b.class_id)
     ctx.strokeStyle = accent
-    ctx.lineWidth = isSel ? 2.5 : 2
+    ctx.lineWidth = isSel ? 3 : 2
     ctx.strokeRect(x, y, bw, bh)
+    // 选中：白色外描边，便于在同类色块中辨认
+    if (isSel) {
+      ctx.strokeStyle = '#ffffffcc'
+      ctx.lineWidth = 1.5
+      ctx.strokeRect(x - 1, y - 1, bw + 2, bh + 2)
+      ctx.strokeStyle = accent
+      ctx.lineWidth = 3
+      ctx.strokeRect(x, y, bw, bh)
+    }
 
     // 类别标签：彩色底 + 白字
     const label = props.classes[b.class_id] || `类${b.class_id}`
@@ -116,7 +126,7 @@ function draw() {
     const y = Math.min(startY, curY)
     const bw = Math.abs(curX - startX)
     const bh = Math.abs(curY - startY)
-    ctx.strokeStyle = '#1a5f7a'
+    ctx.strokeStyle = classAccent(props.classId)
     ctx.setLineDash([6, 4])
     ctx.strokeRect(x, y, bw, bh)
     ctx.setLineDash([])

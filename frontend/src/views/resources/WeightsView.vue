@@ -20,7 +20,7 @@ const loading = ref(false)
 const weights = ref<WeightItem[]>([])
 const taskTypes = ref<WeightTaskTypeItem[]>([
   { task_type: 'detect', label: '目标检测', enabled: true },
-  { task_type: 'segment', label: '实例分割', enabled: false },
+  { task_type: 'segment', label: '实例分割', enabled: true },
 ])
 const activeType = ref('detect')
 const query = ref('')

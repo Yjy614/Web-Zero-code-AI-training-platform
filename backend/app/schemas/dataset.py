@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 class DatasetCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="数据集名称")
+    task_type: str = Field(default="detect", description="任务类型：detect | segment")
 
 
 class DatasetOut(BaseModel):
@@ -28,6 +29,8 @@ class DatasetOut(BaseModel):
 
 class ClassesUpdate(BaseModel):
     classes: list[str] = Field(default_factory=list)
+    # 本次删除的旧类别下标：删除后清掉对应标注，并将更大的 class_id 前移
+    removed_indices: list[int] = Field(default_factory=list)
 
 
 class BBox(BaseModel):
@@ -40,13 +43,29 @@ class BBox(BaseModel):
     height: float = Field(..., gt=0, le=1)
 
 
+class Point2D(BaseModel):
+    """归一化坐标点（0~1）。"""
+
+    x: float = Field(..., ge=0, le=1)
+    y: float = Field(..., ge=0, le=1)
+
+
+class PolygonInstance(BaseModel):
+    """YOLO-seg 多边形实例：至少 3 个归一化顶点。"""
+
+    class_id: int = Field(..., ge=0)
+    points: list[Point2D] = Field(..., min_length=3)
+
+
 class AnnotationPayload(BaseModel):
     boxes: list[BBox] = Field(default_factory=list)
+    polygons: list[PolygonInstance] = Field(default_factory=list)
 
 
 class AnnotationOut(BaseModel):
     image: str
-    boxes: list[BBox]
+    boxes: list[BBox] = Field(default_factory=list)
+    polygons: list[PolygonInstance] = Field(default_factory=list)
 
 
 class CleanResult(BaseModel):

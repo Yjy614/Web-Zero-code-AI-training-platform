@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from app.core.config import storage_root_path
+from app.core.task_types import normalize_task_type
 
 SAFE_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff\-]+$")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -33,19 +34,23 @@ def owner_storage_key(username: str) -> str:
     return name
 
 
-def owner_dir(username: str) -> Path:
-    """返回某用户下的 detect 数据集父目录。"""
-    return storage_root_path() / "datasets" / "detect" / owner_storage_key(username)
+def owner_dir(username: str, task_type: str = "detect") -> Path:
+    """返回某用户下指定任务类型的数据集父目录。"""
+    tt = normalize_task_type(task_type)
+    return storage_root_path() / "datasets" / tt / owner_storage_key(username)
 
 
-def dataset_dir(username: str, name: str) -> Path:
+def dataset_dir(username: str, name: str, task_type: str = "detect") -> Path:
     """返回用户隔离后的数据集根目录。"""
-    return owner_dir(username) / name
+    return owner_dir(username, task_type) / name
 
 
-def ensure_dataset_dirs(username: str, name: str, *, owner_id: int = 0) -> Path:
+def ensure_dataset_dirs(
+    username: str, name: str, *, owner_id: int = 0, task_type: str = "detect"
+) -> Path:
     """创建 images / labels / removed 目录，并写入空 meta。"""
-    root = dataset_dir(username, name)
+    tt = normalize_task_type(task_type)
+    root = dataset_dir(username, name, tt)
     (root / "images").mkdir(parents=True, exist_ok=True)
     (root / "labels").mkdir(parents=True, exist_ok=True)
     (root / "removed" / "images").mkdir(parents=True, exist_ok=True)
@@ -56,7 +61,7 @@ def ensure_dataset_dirs(username: str, name: str, *, owner_id: int = 0) -> Path:
             root,
             {
                 "name": name,
-                "task_type": "detect",
+                "task_type": tt,
                 "owner_id": owner_id,
                 "owner_username": owner_storage_key(username),
                 "classes": [],
@@ -180,10 +185,12 @@ def is_safe_image_name(name: str) -> bool:
     return Path(name).suffix.lower() in IMAGE_EXTS
 
 
-def is_user_scoped_path(path: Path, username: str, name: str) -> bool:
-    """判断 path 是否已是 <username>/<name> 结构。"""
+def is_user_scoped_path(
+    path: Path, username: str, name: str, task_type: str = "detect"
+) -> bool:
+    """判断 path 是否已是 datasets/<task_type>/<username>/<name> 结构。"""
     try:
-        return path.resolve() == dataset_dir(username, name).resolve()
+        return path.resolve() == dataset_dir(username, name, task_type).resolve()
     except OSError:
         return False
 
@@ -194,12 +201,14 @@ def migrate_dataset_to_user_scope(
     name: str,
     *,
     owner_id: int = 0,
+    task_type: str = "detect",
 ) -> Path:
     """
-    将旧版扁平目录或 user_<id> 目录迁移到 datasets/detect/<username>/<name>。
+    将旧版扁平目录或 user_<id> 目录迁移到 datasets/<task_type>/<username>/<name>。
     若目标已存在则保留目标；返回最终路径。
     """
-    target = dataset_dir(username, name)
+    tt = normalize_task_type(task_type)
+    target = dataset_dir(username, name, tt)
     target.parent.mkdir(parents=True, exist_ok=True)
     src = Path(old_path)
 
@@ -212,11 +221,11 @@ def migrate_dataset_to_user_scope(
     if src.exists():
         shutil.move(str(src), str(target))
     else:
-        ensure_dataset_dirs(username, name, owner_id=owner_id)
+        ensure_dataset_dirs(username, name, owner_id=owner_id, task_type=tt)
 
     meta = read_meta(target)
     meta["name"] = name
-    meta["task_type"] = meta.get("task_type", "detect")
+    meta["task_type"] = tt
     meta["owner_id"] = owner_id
     meta["owner_username"] = owner_storage_key(username)
     if "classes" not in meta:

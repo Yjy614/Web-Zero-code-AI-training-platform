@@ -68,23 +68,25 @@ def username_by_id(db: Session, owner_id: int) -> str:
 def migrate_datasets_to_user_scope(db: Session) -> None:
     """
     将旧版扁平路径或 user_<id> 路径
-    迁移为 datasets/detect/<username>/<name>，并回写 DB.path。
+    迁移为 datasets/<task_type>/<username>/<name>，并回写 DB.path。
     """
     # 先把磁盘上 user_<id> 目录整体改名为用户名
     _migrate_owner_dirs_on_disk(db)
 
-    rows = db.query(Dataset).filter(Dataset.task_type == "detect").all()
+    rows = db.query(Dataset).all()
     changed = False
     for ds in rows:
         uname = username_by_id(db, ds.owner_id)
+        tt = ds.task_type or "detect"
         current = Path(ds.path)
-        if dataset_storage.is_user_scoped_path(current, uname, ds.name) and current.exists():
+        if dataset_storage.is_user_scoped_path(current, uname, ds.name, tt) and current.exists():
             continue
         new_path = dataset_storage.migrate_dataset_to_user_scope(
             ds.path,
             uname,
             ds.name,
             owner_id=ds.owner_id,
+            task_type=tt,
         )
         if str(new_path) != ds.path:
             ds.path = str(new_path)

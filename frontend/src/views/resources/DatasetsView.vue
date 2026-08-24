@@ -52,16 +52,17 @@ async function onCreate() {
     ElMessage.warning('请输入名称')
     return
   }
-  if (activeType.value !== 'detect') {
-    ElMessage.warning('当前仅开放目标检测数据集创建')
-    return
-  }
-  const { data } = await createDataset(newName.value.trim())
+  const { data } = await createDataset(newName.value.trim(), activeType.value)
   ElMessage.success('已创建')
   createVisible.value = false
   newName.value = ''
   await load()
-  router.push({ path: '/app/detect/wizard', query: { datasetId: String(data.id) } })
+  // 分割向导二期再开放；检测可直接进入
+  if (activeType.value === 'detect') {
+    router.push({ path: '/app/detect/wizard', query: { datasetId: String(data.id) } })
+  } else {
+    router.push({ path: '/app/segment/wizard', query: { datasetId: String(data.id) } })
+  }
 }
 
 async function onDelete(row: DatasetItem) {
@@ -87,8 +88,9 @@ async function onDownload(row: DatasetItem) {
 }
 
 function openWizard(row: DatasetItem) {
-  if ((row.task_type || 'detect') !== 'detect') {
-    ElMessage.info('该任务类型向导尚未开放')
+  const tt = row.task_type || 'detect'
+  if (tt === 'segment') {
+    router.push({ path: '/app/segment/wizard', query: { datasetId: String(row.id) } })
     return
   }
   router.push({ path: '/app/detect/wizard', query: { datasetId: String(row.id) } })
@@ -125,7 +127,6 @@ onMounted(load)
       <el-button
         type="primary"
         :icon="Plus"
-        :disabled="activeType !== 'detect'"
         @click="createVisible = true"
       >
         新建数据集
@@ -198,12 +199,11 @@ onMounted(load)
     <div v-else class="empty">
       <div class="empty-icon" aria-hidden="true"><el-icon :size="28"><Collection /></el-icon></div>
       <p>
-        <template v-if="activeType === 'segment'">实例分割数据集能力即将开放。</template>
-        <template v-else-if="query">无匹配「{{ query }}」的数据集。</template>
-        <template v-else>暂无数据集。可在此新建，或前往训练向导创建并上传。</template>
+        <template v-if="query">无匹配「{{ query }}」的数据集。</template>
+        <template v-else>暂无数据集。可在此新建，或前往对应训练向导创建并上传。</template>
       </p>
       <el-button
-        v-if="activeType === 'detect' && !query"
+        v-if="!query"
         type="primary"
         :icon="Plus"
         @click="createVisible = true"
@@ -212,7 +212,11 @@ onMounted(load)
       </el-button>
     </div>
 
-    <el-dialog v-model="createVisible" title="新建检测数据集" width="420px">
+    <el-dialog
+      v-model="createVisible"
+      :title="activeType === 'segment' ? '新建实例分割数据集' : '新建检测数据集'"
+      width="420px"
+    >
       <el-input
         v-model="newName"
         placeholder="名称（中文/字母/数字/下划线/短横线）"

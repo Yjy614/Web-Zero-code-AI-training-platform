@@ -6,6 +6,8 @@ import {
   Box,
   Collection,
   Cpu,
+  Crop,
+  PictureFilled,
   Setting,
   SwitchButton,
   User,
@@ -25,8 +27,10 @@ const active = computed(() => route.path)
 const menus = computed(() => {
   const items = [
     { path: '/app/detect/wizard', title: '目标检测训练', icon: Aim },
+    { path: '/app/segment/wizard', title: '实例分割训练', icon: Crop },
     { path: '/app/resources/datasets', title: '数据集管理', icon: Collection },
     { path: '/app/resources/models', title: '模型库', icon: Box },
+    { path: '/app/resources/infer', title: '推理试用', icon: PictureFilled },
     { path: '/app/resources/weights', title: '基础模型权重仓库', icon: Cpu },
     { path: '/app/settings', title: '系统设置', icon: Setting },
   ]
@@ -76,12 +80,6 @@ async function onLogout() {
           <el-icon :size="18"><component :is="item.icon" /></el-icon>
           <span v-show="!collapsed">{{ item.title }}</span>
         </button>
-
-        <div class="nav-disabled" title="即将推出">
-          <el-icon :size="18"><Aim /></el-icon>
-          <span v-show="!collapsed">实例分割训练</span>
-          <em v-show="!collapsed">即将推出</em>
-        </div>
       </nav>
 
       <div class="sidebar-foot">
@@ -107,8 +105,8 @@ async function onLogout() {
       </header>
       <main class="content fade-up">
         <RouterView v-slot="{ Component, route: r }">
-          <KeepAlive :include="['DetectWizard']">
-            <component :is="Component" :key="r.name as string" />
+          <KeepAlive :include="['DetectWizard', 'SegmentWizard']" :max="12">
+            <component :is="Component" :key="String(r.name || r.path)" />
           </KeepAlive>
         </RouterView>
       </main>

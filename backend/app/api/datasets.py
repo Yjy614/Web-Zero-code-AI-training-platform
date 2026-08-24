@@ -32,8 +32,21 @@ from app.schemas.task import JobOut
 from app.services import dataset_annotate, dataset_clean, dataset_prelabel, dataset_storage
 from app.services.bootstrap import username_by_id
 from app.services.runtime_settings import is_demo_mode
+from app.core.task_types import normalize_task_type
 
 router = APIRouter(prefix="/datasets", tags=["数据集"])
+
+
+def _guess_image_media(path: Path) -> str:
+    """按后缀给出图片 MIME，避免浏览器无法解码。"""
+    ext = path.suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+    }.get(ext, "application/octet-stream")
 
 
 def _to_out(ds: Dataset) -> DatasetOut:
@@ -85,7 +98,11 @@ def list_datasets(
     db: Session = Depends(get_db),
 ) -> list[DatasetOut]:
     """列出数据集（user 仅自己的，admin 全部）。"""
-    q = db.query(Dataset).filter(Dataset.task_type == task_type)
+    try:
+        tt = normalize_task_type(task_type)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": "bad_task_type", "message": str(e)}) from e
+    q = db.query(Dataset).filter(Dataset.task_type == tt)
     if user.role != "admin":
         q = q.filter(Dataset.owner_id == user.id)
     rows = q.order_by(Dataset.id.desc()).all()
@@ -98,26 +115,30 @@ def create_dataset(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DatasetOut:
-    """创建检测数据集目录与元数据。"""
+    """创建数据集目录与元数据（支持 detect / segment）。"""
     try:
         name = dataset_storage.validate_dataset_name(body.name)
+        tt = normalize_task_type(body.task_type)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "bad_name", "message": str(e)}) from e
+        code = "bad_task_type" if "任务类型" in str(e) else "bad_name"
+        raise HTTPException(status_code=400, detail={"code": code, "message": str(e)}) from e
 
-    # 同一用户下数据集名唯一（不同用户可同名）
+    # 同一用户、同一任务类型下数据集名唯一
     conflict = (
         db.query(Dataset)
-        .filter(Dataset.name == name, Dataset.task_type == "detect", Dataset.owner_id == user.id)
+        .filter(Dataset.name == name, Dataset.task_type == tt, Dataset.owner_id == user.id)
         .first()
     )
     if conflict:
         raise HTTPException(status_code=400, detail={"code": "exists", "message": "您已有同名数据集"})
 
-    root = dataset_storage.ensure_dataset_dirs(user.username, name, owner_id=user.id)
+    root = dataset_storage.ensure_dataset_dirs(
+        user.username, name, owner_id=user.id, task_type=tt
+    )
     ds = Dataset(
         name=name,
         path=str(root),
-        task_type="detect",
+        task_type=tt,
         owner_id=user.id,
         classes_json="[]",
         image_count=0,
@@ -301,7 +322,7 @@ def get_image_file(
         path = root / "removed" / "images" / image_name
     if not path.exists():
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
-    return FileResponse(path)
+    return FileResponse(path, media_type=_guess_image_media(path))
 
 
 @router.post("/{dataset_id}/clean", response_model=CleanResult)
@@ -464,6 +485,14 @@ async def start_prelabel(
 ) -> JobOut:
     """启动 AI 预标注（短训 + 推理未标注图）。"""
     ds = _get_accessible(db, dataset_id, user)
+    if (ds.task_type or "detect") != "detect":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "prelabel_not_ready",
+                "message": "实例分割预标注将在二期开放（计划支持 SAM 与 AI 短训预标注）",
+            },
+        )
     root = Path(ds.path)
     try:
         classes = json.loads(ds.classes_json or "[]")
@@ -560,9 +589,10 @@ def put_classes(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """更新类别列表，并同步 meta.json。"""
+    """更新类别列表，并同步 meta.json；若有删除则清理全库对应标注。"""
     ds = _get_accessible(db, dataset_id, user)
     classes = [c.strip() for c in body.classes if c and c.strip()]
+    removed_indices = [int(i) for i in (body.removed_indices or []) if int(i) >= 0]
     ds.classes_json = json.dumps(classes, ensure_ascii=False)
     db.commit()
     root = Path(ds.path)
@@ -575,7 +605,15 @@ def put_classes(
     meta["owner_username"] = username_by_id(db, ds.owner_id)
     meta["task_type"] = ds.task_type
     dataset_storage.write_meta(root, meta)
-    return {"classes": classes}
+
+    # 删除类别：去掉该 class_id 标注，并将更大 id 前移；再清掉越界孤儿
+    purge_info = dataset_annotate.purge_and_remap_class_ids(
+        root,
+        task_type=ds.task_type or "detect",
+        removed_indices=removed_indices,
+        class_count=len(classes),
+    )
+    return {"classes": classes, "purge": purge_info}
 
 
 @router.get("/{dataset_id}/annotations/{image_name}", response_model=AnnotationOut)
@@ -585,12 +623,16 @@ def get_annotation(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AnnotationOut:
-    """读取单张图标注。"""
+    """读取单张图标注（检测 boxes / 分割 polygons）。"""
     ds = _get_accessible(db, dataset_id, user)
     if not dataset_storage.is_safe_image_name(image_name):
         raise HTTPException(status_code=400, detail={"code": "bad_name", "message": "非法文件名"})
-    boxes = dataset_annotate.read_annotations(Path(ds.path), image_name)
-    return AnnotationOut(image=image_name, boxes=boxes)
+    root = Path(ds.path)
+    if (ds.task_type or "detect") == "segment":
+        polygons = dataset_annotate.read_polygons(root, image_name)
+        return AnnotationOut(image=image_name, boxes=[], polygons=polygons)
+    boxes = dataset_annotate.read_annotations(root, image_name)
+    return AnnotationOut(image=image_name, boxes=boxes, polygons=[])
 
 
 @router.put("/{dataset_id}/annotations/{image_name}", response_model=AnnotationOut)
@@ -609,5 +651,9 @@ def put_annotation(
     img_path = Path(ds.path) / "images" / image_name
     if not img_path.exists():
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
-    dataset_annotate.write_annotations(Path(ds.path), image_name, body.boxes)
-    return AnnotationOut(image=image_name, boxes=body.boxes)
+    root = Path(ds.path)
+    if (ds.task_type or "detect") == "segment":
+        dataset_annotate.write_polygons(root, image_name, body.polygons)
+        return AnnotationOut(image=image_name, boxes=[], polygons=body.polygons)
+    dataset_annotate.write_annotations(root, image_name, body.boxes)
+    return AnnotationOut(image=image_name, boxes=body.boxes, polygons=[])

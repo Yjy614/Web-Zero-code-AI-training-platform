@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 模型库：训练产出卡片列表，按任务类型筛选。
- * 卡片：右上角删除；左下下载 PT；右下下载/转 ONNX（转格式时按钮内淡进度条）。
+ * 卡片：右上角删除；下方 PT / ONNX 按钮样式统一；转 ONNX 时按钮内淡进度条。
  */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -127,16 +127,20 @@ function pollOnnxJob(modelId: number, jobId: number, row: ModelItem) {
 
 async function onDownloadOnnx(row: ModelItem) {
   if (onnxBusy[row.id]) return
+  if (row.has_pt === false) {
+    ElMessage.warning('PT 模型文件不存在，无法导出 ONNX')
+    return
+  }
   // 已有 ONNX：直接下载
   if (row.has_onnx) {
     try {
       await downloadModel(row.id, `${displayModelName(row.name)}.onnx`, 'onnx')
       ElMessage.success('已开始下载 ONNX 模型')
+      return
     } catch {
       // 可能文件被删，走转格式
       row.has_onnx = false
     }
-    if (row.has_onnx) return
   }
 
   onnxBusy[row.id] = { progress: 2, message: '准备转格式…' }
@@ -177,7 +181,7 @@ async function onDelete(row: ModelItem) {
   try {
     clearOnnxBusy(row.id)
     await deleteModel(row.id)
-    ElMessage.success('已删除')
+    ElMessage.success('已删除（含该版本的 runs / exports / reports）')
     await load()
   } catch {
     // 拦截器提示
@@ -293,8 +297,13 @@ onUnmounted(() => {
           <div class="card-title">
             <h3 :title="displayModelName(row.name)">{{ displayModelName(row.name) }}</h3>
             <div class="meta">
-              <span class="tag">{{ row.task_type || 'detect' }}</span>
-              <span>{{ formatTime(row.created_at) }}</span>
+              <span
+                class="tag"
+                :class="(row.task_type || 'detect') === 'segment' ? 'tag-segment' : 'tag-detect'"
+              >
+                {{ row.task_type || 'detect' }}
+              </span>
+              <span class="meta-time">{{ formatTime(row.created_at) }}</span>
             </div>
           </div>
         </div>
@@ -312,32 +321,41 @@ onUnmounted(() => {
           <el-button
             type="primary"
             plain
+            class="action-btn"
             :icon="Download"
             :disabled="row.has_pt === false"
             @click="onDownloadPt(row)"
           >
-            下载PT模型
+            下载PT
           </el-button>
-          <button
-            type="button"
-            class="onnx-btn"
-            :class="{ busy: Boolean(onnxBusy[row.id]) }"
-            :disabled="Boolean(onnxBusy[row.id])"
-            @click="onDownloadOnnx(row)"
-          >
+          <div class="onnx-wrap" :class="{ busy: Boolean(onnxBusy[row.id]) }">
             <span
               v-if="onnxBusy[row.id]"
               class="onnx-bar"
               :style="{ width: `${Math.max(6, onnxBusy[row.id].progress)}%` }"
             />
-            <span class="onnx-label">
+            <el-button
+              type="primary"
+              plain
+              class="action-btn onnx-el-btn"
+              :icon="onnxBusy[row.id] ? undefined : Download"
+              :disabled="Boolean(onnxBusy[row.id]) || row.has_pt === false"
+              :title="
+                onnxBusy[row.id]
+                  ? onnxBusy[row.id].message || '正在转格式…'
+                  : row.has_onnx
+                    ? '下载ONNX模型'
+                    : '转ONNX并下载'
+              "
+              @click="onDownloadOnnx(row)"
+            >
               <template v-if="onnxBusy[row.id]">
-                {{ onnxBusy[row.id].message || '正在转格式…' }}
                 {{ Math.round(onnxBusy[row.id].progress) }}%
               </template>
-              <template v-else>下载ONNX模型</template>
-            </span>
-          </button>
+              <template v-else-if="row.has_onnx">下载ONNX</template>
+              <template v-else>转ONNX</template>
+            </el-button>
+          </div>
         </div>
       </article>
     </div>
@@ -346,8 +364,9 @@ onUnmounted(() => {
       <div class="empty-icon" aria-hidden="true"><el-icon :size="28"><Box /></el-icon></div>
       <p>
         <template v-if="query">无匹配「{{ query }}」的模型。</template>
-        <template v-else-if="activeType === 'segment'">实例分割模型库暂无记录（模块预留）。</template>
-        <template v-else>暂无模型。请在检测向导中完成训练后查看。</template>
+        <template v-else-if="activeType === 'segment'">暂无实例分割训练产出模型。</template>
+        <template v-else-if="activeType === 'detect'">暂无目标检测训练产出模型。</template>
+        <template v-else>完成训练后，模型会出现在这里。</template>
       </p>
     </div>
   </section>
@@ -456,18 +475,22 @@ onUnmounted(() => {
   grid-template-columns: repeat(auto-fill, minmax(280px, 300px));
   gap: 0.85rem;
   justify-content: start;
+  align-items: stretch;
 }
 .card {
   position: relative;
   display: grid;
+  /* 三段固定结构：头 / 指标 / 操作，保证同行卡片横向对齐 */
+  grid-template-rows: 48px auto auto;
   gap: 0.75rem;
   width: 100%;
   max-width: 300px;
+  height: 100%;
   padding: 0.95rem;
   background: var(--surface-elevated);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
-  align-content: start;
+  box-sizing: border-box;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .card:hover {
@@ -498,8 +521,11 @@ onUnmounted(() => {
 .card-top {
   display: flex;
   gap: 0.75rem;
-  align-items: flex-start;
+  align-items: center;
+  min-height: 48px;
+  height: 48px;
   padding-right: 1.4rem;
+  min-width: 0;
 }
 .card-icon {
   width: 48px;
@@ -513,30 +539,55 @@ onUnmounted(() => {
 }
 .card-title {
   min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.28rem;
 }
 .card-title h3 {
   margin: 0;
   font-size: 1.02rem;
+  line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .meta {
   display: flex;
-  gap: 0.55rem;
+  gap: 0.45rem;
   align-items: center;
-  margin-top: 0.35rem;
+  min-width: 0;
   color: var(--ink-faint);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.meta-time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tag {
   display: inline-flex;
-  padding: 0.12rem 0.45rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.2rem;
+  padding: 0.1rem 0.4rem;
   border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+/* 任务类型标签：尺寸统一，仅用色区分类型 */
+.tag-detect {
+  background: #eef2f6;
+  color: #3d4f5f;
+}
+.tag-segment {
   background: var(--brand-mist);
   color: var(--brand-deep);
-  font-size: 0.75rem;
-  font-weight: 600;
 }
 .metric-row {
   display: grid;
@@ -548,75 +599,70 @@ onUnmounted(() => {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 0.55rem 0.7rem;
+  min-height: 3.35rem;
+  box-sizing: border-box;
 }
 .metric span {
   display: block;
   font-size: 0.72rem;
   color: var(--ink-faint);
+  line-height: 1.2;
 }
 .metric strong {
   display: block;
-  margin-top: 0.15rem;
+  margin-top: 0.2rem;
   font-family: var(--font-display);
   font-size: 1.05rem;
+  line-height: 1.2;
   color: var(--brand-deep);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .card-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
+  align-items: stretch;
+  height: 32px;
 }
-.card-actions :deep(.el-button) {
+.card-actions :deep(.action-btn) {
   width: 100%;
+  height: 32px;
   margin: 0;
-  padding-left: 0.4rem;
-  padding-right: 0.4rem;
-  font-size: 0.82rem;
+  padding: 0 0.35rem;
+  font-size: 0.8rem;
+  white-space: nowrap;
 }
-.onnx-btn {
+.onnx-wrap {
   position: relative;
   overflow: hidden;
-  width: 100%;
-  margin: 0;
-  min-height: 32px;
-  border: 1px solid var(--el-color-primary-light-5, #a0cfff);
   border-radius: var(--el-border-radius-base, 4px);
-  background: var(--el-color-primary-light-9, #ecf5ff);
-  color: var(--el-color-primary, #409eff);
-  font: inherit;
-  font-size: 0.82rem;
-  cursor: pointer;
-  padding: 0 0.4rem;
+  min-width: 0;
+  height: 32px;
 }
-.onnx-btn:hover:not(:disabled) {
-  background: var(--el-color-primary-light-8, #d9ecff);
-}
-.onnx-btn:disabled,
-.onnx-btn.busy {
+.onnx-wrap.busy {
   cursor: wait;
+}
+.onnx-wrap :deep(.onnx-el-btn) {
+  position: relative;
+  z-index: 1;
+}
+.onnx-wrap.busy :deep(.onnx-el-btn) {
   color: var(--brand-deep);
   border-color: #b7cdd0;
-  background: #f3f8f9;
+  background: rgba(243, 248, 249, 0.55);
 }
 .onnx-bar {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
+  z-index: 0;
   background: rgba(61, 155, 143, 0.22);
   transition: width 0.35s ease;
   pointer-events: none;
-}
-.onnx-label {
-  position: relative;
-  z-index: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.2rem;
-  width: 100%;
-  line-height: 1.2;
-  padding: 0.35rem 0;
 }
 .empty {
   text-align: center;

@@ -23,7 +23,13 @@ const router = createRouter({
           path: 'detect/wizard',
           name: 'detect-wizard',
           component: () => import('@/views/detect/WizardView.vue'),
-          meta: { title: '目标检测训练' },
+          meta: { title: '目标检测训练', taskType: 'detect' },
+        },
+        {
+          path: 'segment/wizard',
+          name: 'segment-wizard',
+          component: () => import('@/views/segment/WizardView.vue'),
+          meta: { title: '实例分割训练', taskType: 'segment' },
         },
         {
           path: 'resources/datasets',
@@ -36,6 +42,12 @@ const router = createRouter({
           name: 'models',
           component: () => import('@/views/resources/ModelsView.vue'),
           meta: { title: '模型库' },
+        },
+        {
+          path: 'resources/infer',
+          name: 'infer',
+          component: () => import('@/views/resources/InferView.vue'),
+          meta: { title: '推理试用' },
         },
         {
           path: 'resources/weights',

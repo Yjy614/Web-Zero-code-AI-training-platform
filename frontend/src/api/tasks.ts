@@ -158,18 +158,88 @@ export function deleteWeight(name: string, taskType = 'detect') {
   return http.delete(`/weights/${encodeURIComponent(name)}`, { params: { task_type: taskType } })
 }
 
+export interface DetectItem {
+  class_id: number
+  class_name: string
+  confidence: number
+  bbox_xyxy: number[]
+  polygon?: number[][] | null
+}
+
+export interface PredictResult {
+  task_type: string
+  model_format: string
+  count: number
+  detections: DetectItem[]
+  image_base64: string
+  image_mime: string
+  width: number
+  height: number
+  conf: number
+  iou: number
+  imgsz: number
+}
+
+/** 模型库推理试用：上传图片，返回可视化与检测列表。 */
+export function predictModel(
+  modelId: number,
+  file: File,
+  opts?: { conf?: number; iou?: number; imgsz?: number },
+) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('conf', String(opts?.conf ?? 0.25))
+  form.append('iou', String(opts?.iou ?? 0.45))
+  form.append('imgsz', String(opts?.imgsz ?? 640))
+  return http.post<PredictResult>(`/models/${modelId}/predict`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 5 * 60 * 1000,
+  })
+}
+
+/** 若 blob 实为接口错误 JSON 则抛出；HTML/文本报告不能当错误。 */
+async function rejectIfErrorJsonBlob(blob: Blob) {
+  const type = (blob.type || '').toLowerCase()
+  if (!type.includes('json')) return
+  let msg = '下载失败'
+  try {
+    const parsed = JSON.parse(await blob.text()) as {
+      detail?: { message?: string } | string
+      message?: string
+    }
+    if (typeof parsed.detail === 'string') msg = parsed.detail
+    else if (parsed.detail && typeof parsed.detail === 'object' && parsed.detail.message) {
+      msg = parsed.detail.message
+    } else if (parsed.message) msg = parsed.message
+  } catch {
+    // ignore parse
+  }
+  throw new Error(msg)
+}
+
+function saveBlobAsFile(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.rel = 'noopener'
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000)
+}
+
 /** 下载模型库中的模型文件（format: pt | onnx）。 */
 export async function downloadModel(modelId: number, filename = 'best.pt', format: 'pt' | 'onnx' = 'pt') {
   const res = await http.get(`/models/${modelId}/download`, {
     params: { format },
     responseType: 'blob',
+    timeout: 10 * 60 * 1000,
   })
-  const url = URL.createObjectURL(res.data)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  const blob = res.data as Blob
+  await rejectIfErrorJsonBlob(blob)
+  saveBlobAsFile(blob, filename)
 }
 
 /** 带鉴权下载产物。 */
@@ -177,11 +247,13 @@ export async function downloadTaskFile(taskId: number, kind: 'report' | 'export'
   const res = await http.get(`/tasks/${taskId}/download/${kind}`, {
     params: name ? { name } : undefined,
     responseType: 'blob',
+    timeout: 10 * 60 * 1000,
   })
-  const url = URL.createObjectURL(res.data)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name || (kind === 'weight' ? 'best.pt' : kind === 'report' ? 'eval_report.html' : 'export.bin')
-  a.click()
-  URL.revokeObjectURL(url)
+  const blob = res.data as Blob
+  await rejectIfErrorJsonBlob(blob)
+  const filename =
+    (name || (kind === 'weight' ? 'best.pt' : kind === 'report' ? 'eval_report.html' : 'export.bin'))
+      .split(/[/\\]/)
+      .pop() || 'download.bin'
+  saveBlobAsFile(blob, filename)
 }
