@@ -84,6 +84,7 @@ def list_weight_task_types(user: User = Depends(get_current_user)) -> dict:
     labels = {
         "detect": "目标检测",
         "segment": "实例分割",
+        "pose": "姿态估计",
     }
     return {
         "items": [

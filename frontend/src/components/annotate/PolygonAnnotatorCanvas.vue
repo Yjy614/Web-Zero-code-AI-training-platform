@@ -3,6 +3,7 @@
  * 实例分割：连点多边形标注。
  * 草稿/孤点与已保存多边形一律用归一化坐标，缩放时不会跑偏。
  * 闭合时靠近首点有高亮磁吸。图片加载方式与检测画布一致（Image + decode）。
+ * 支持 mode=point（连点）/ sam（单击请求 SAM2 掩膜）。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -14,11 +15,17 @@ const props = defineProps<{
   polygons: PolygonInstance[]
   classId: number
   classes: string[]
+  /** 标注模式：点选连点 / SAM 单击 */
+  mode?: 'point' | 'sam'
+  /** SAM 请求进行中：禁止重复点击 */
+  samBusy?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:polygons': [polygons: PolygonInstance[]]
   navigate: [dir: 'prev' | 'next']
+  /** SAM 模式：归一化坐标点击 */
+  'sam-click': [pt: { x: number; y: number }]
 }>()
 
 type Pt = { x: number; y: number }
@@ -446,18 +453,20 @@ function onDown(e: MouseEvent) {
   // 双击第二次按下不加点，交给 onDblClick
   if (e.detail >= 2 || Date.now() < suppressAddUntil) return
   if (!imgEl.value) return
+  if (props.samBusy) return
 
   const p = canvasPos(e)
+  const isSam = props.mode === 'sam'
 
-  // 磁吸闭合：优先于拖动首点
-  if (nearFirstPoint(p)) {
+  // 磁吸闭合：仅点选模式
+  if (!isSam && nearFirstPoint(p)) {
     closeDraft()
     return
   }
 
   const vHit = hitVertex(p)
   if (vHit) {
-    if (vHit.kind === 'draft' && vHit.ptIdx === 0 && draft.value.length >= 3) {
+    if (!isSam && vHit.kind === 'draft' && vHit.ptIdx === 0 && draft.value.length >= 3) {
       closeDraft()
       return
     }
@@ -484,6 +493,14 @@ function onDown(e: MouseEvent) {
       return
     }
     selected.value = -1
+  }
+
+  // SAM 模式：空白处单击 → 交给外层请求掩膜
+  if (isSam) {
+    cancelDraft()
+    const n = toNorm(p.x, p.y)
+    emit('sam-click', n)
+    return
   }
 
   draft.value = [...draft.value, toNorm(p.x, p.y)]
@@ -624,6 +641,7 @@ function onKey(e: KeyboardEvent) {
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
   if (e.key === 'Enter') {
     e.preventDefault()
+    if (props.mode === 'sam') return
     closeDraft()
     return
   }
@@ -690,6 +708,14 @@ watch(
   { deep: true },
 )
 
+watch(
+  () => props.mode,
+  () => {
+    // 切换模式时清掉未闭合草稿，避免点选残点干扰 SAM
+    cancelDraft()
+  },
+)
+
 watch(displaySize, () => {
   if (imgEl.value) draw()
 })
@@ -734,8 +760,13 @@ onUnmounted(() => {
       @wheel.prevent="onWheel"
     />
     <p class="tip">
-      单击连点（虚线跟随鼠标）· 拖动顶点 · 靠近首点磁吸闭合 · 双击区域删整块 · 双击边/点删除 ·
-      无连线的单点会自动清除 · Enter 闭合 · Esc 取消 · 滚轮缩放
+      <template v-if="mode === 'sam'">
+        SAM：单击目标生成轮廓 · 双击区域删除 · 滚轮缩放
+      </template>
+      <template v-else>
+        单击连点（虚线跟随鼠标）· 拖动顶点 · 靠近首点磁吸闭合 · 双击区域删整块 · 双击边/点删除 ·
+        无连线的单点会自动清除 · Enter 闭合 · Esc 取消 · 滚轮缩放
+      </template>
     </p>
   </div>
 </template>

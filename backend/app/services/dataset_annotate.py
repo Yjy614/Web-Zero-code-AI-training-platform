@@ -1,11 +1,12 @@
-"""YOLO 标注读写：检测 bbox / 实例分割 polygon。"""
+"""YOLO 标注读写：检测 bbox / 实例分割 polygon / 姿态 pose。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from app.schemas.dataset import BBox, Point2D, PolygonInstance
-from app.services.dataset_storage import label_path_for
+from app.schemas.dataset import BBox, Keypoint, Point2D, PolygonInstance, PoseInstance
+from app.services.dataset_storage import label_path_for, read_meta
+from app.services.pose_skeleton import kpt_count, pose_config_from_meta
 
 
 def read_annotations(root: Path, image_name: str) -> list[BBox]:
@@ -97,6 +98,87 @@ def write_polygons(root: Path, image_name: str, polygons: list[PolygonInstance])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _expected_kpt_n(root: Path) -> int:
+    return kpt_count(pose_config_from_meta(read_meta(root)))
+
+
+def _pad_keypoints(kpts: list[Keypoint], n: int) -> list[Keypoint]:
+    out = list(kpts[:n])
+    while len(out) < n:
+        out.append(Keypoint(x=0.0, y=0.0, v=0))
+    return out
+
+
+def read_poses(root: Path, image_name: str, *, kpt_n: int | None = None) -> list[PoseInstance]:
+    """
+    读取 YOLO-Pose txt：
+    class xc yc w h (x y v) * n
+    """
+    n = int(kpt_n) if kpt_n is not None else _expected_kpt_n(root)
+    path = label_path_for(root, image_name)
+    if not path.exists():
+        return []
+    poses: list[PoseInstance] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        rem = len(parts) - 5
+        if rem % 3 != 0:
+            continue
+        try:
+            class_id = int(parts[0])
+            xc, yc, bw, bh = (float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
+            raw = [float(x) for x in parts[5:]]
+        except ValueError:
+            continue
+        kpts: list[Keypoint] = []
+        for i in range(0, len(raw), 3):
+            x = min(1.0, max(0.0, raw[i]))
+            y = min(1.0, max(0.0, raw[i + 1]))
+            v = int(raw[i + 2])
+            if v < 0:
+                v = 0
+            if v > 2:
+                v = 2
+            kpts.append(Keypoint(x=x, y=y, v=v))
+        poses.append(
+            PoseInstance(
+                class_id=class_id,
+                x_center=min(1.0, max(0.0, xc)),
+                y_center=min(1.0, max(0.0, yc)),
+                width=min(1.0, max(1e-6, bw)),
+                height=min(1.0, max(1e-6, bh)),
+                keypoints=_pad_keypoints(kpts, n),
+            )
+        )
+    return poses
+
+
+def write_poses(
+    root: Path, image_name: str, poses: list[PoseInstance], *, kpt_n: int | None = None
+) -> None:
+    """写入 YOLO-Pose txt；空列表则删除标注文件。"""
+    n = int(kpt_n) if kpt_n is not None else _expected_kpt_n(root)
+    path = label_path_for(root, image_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not poses:
+        if path.exists():
+            path.unlink()
+        return
+    lines: list[str] = []
+    for p in poses:
+        kpts = _pad_keypoints(list(p.keypoints or []), n)
+        kpt_s = " ".join(f"{k.x:.6f} {k.y:.6f} {int(k.v)}" for k in kpts)
+        lines.append(
+            f"{p.class_id} {p.x_center:.6f} {p.y_center:.6f} {p.width:.6f} {p.height:.6f} {kpt_s}"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _iter_label_stems(root: Path) -> list[str]:
     labels_dir = root / "labels"
     if not labels_dir.is_dir():
@@ -127,14 +209,13 @@ def purge_and_remap_class_ids(
     若提供 class_count，额外清除 class_id >= class_count 的孤儿标注。
     """
     removed = sorted({int(i) for i in (removed_indices or []) if int(i) >= 0}, reverse=True)
-    is_segment = (task_type or "detect") == "segment"
+    tt = (task_type or "detect").strip().lower()
     touched = 0
     removed_ann = 0
 
     for stem in _iter_label_stems(root):
-        # label 文件名与图片 stem 一致；用任意扩展名拼回去给读写函数
         image_name = f"{stem}.jpg"
-        if is_segment:
+        if tt == "segment":
             items = read_polygons(root, image_name)
             if not items and not label_path_for(root, image_name).exists():
                 continue
@@ -155,6 +236,37 @@ def purge_and_remap_class_ids(
                 next_items.append(PolygonInstance(class_id=mapped, points=poly.points))
             if changed:
                 write_polygons(root, image_name, next_items)
+                touched += 1
+        elif tt == "pose":
+            items_p = read_poses(root, image_name)
+            if not items_p and not label_path_for(root, image_name).exists():
+                continue
+            next_poses: list[PoseInstance] = []
+            changed = False
+            for pose in items_p:
+                mapped = _remap_class_id(pose.class_id, removed)
+                if mapped is None:
+                    removed_ann += 1
+                    changed = True
+                    continue
+                if class_count is not None and mapped >= class_count:
+                    removed_ann += 1
+                    changed = True
+                    continue
+                if mapped != pose.class_id:
+                    changed = True
+                next_poses.append(
+                    PoseInstance(
+                        class_id=mapped,
+                        x_center=pose.x_center,
+                        y_center=pose.y_center,
+                        width=pose.width,
+                        height=pose.height,
+                        keypoints=pose.keypoints,
+                    )
+                )
+            if changed:
+                write_poses(root, image_name, next_poses)
                 touched += 1
         else:
             items_b = read_annotations(root, image_name)

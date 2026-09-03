@@ -27,9 +27,13 @@ from app.schemas.dataset import (
     DatasetOut,
     ImageItem,
     ImageNamesPayload,
+    PoseSkeletonOut,
+    PoseSkeletonUpdate,
+    SamAssistOut,
+    SamAssistRequest,
 )
 from app.schemas.task import JobOut
-from app.services import dataset_annotate, dataset_clean, dataset_prelabel, dataset_storage
+from app.services import dataset_annotate, dataset_clean, dataset_prelabel, dataset_storage, sam_assist
 from app.services.bootstrap import username_by_id
 from app.services.runtime_settings import is_demo_mode
 from app.core.task_types import normalize_task_type
@@ -115,7 +119,7 @@ def create_dataset(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DatasetOut:
-    """创建数据集目录与元数据（支持 detect / segment）。"""
+    """创建数据集目录与元数据（支持 detect / segment / pose）。"""
     try:
         name = dataset_storage.validate_dataset_name(body.name)
         tt = normalize_task_type(body.task_type)
@@ -135,6 +139,28 @@ def create_dataset(
     root = dataset_storage.ensure_dataset_dirs(
         user.username, name, owner_id=user.id, task_type=tt
     )
+    # 姿态：按创建参数覆盖默认 COCO-17
+    if tt == "pose":
+        from app.services.pose_skeleton import coco17_config, custom_config, normalize_pose_config
+
+        try:
+            tpl = (body.pose_template or "coco17").strip().lower()
+            if tpl == "custom":
+                pose_cfg = custom_config(
+                    kpt_names=body.pose_kpt_names,
+                    kpt_count=body.pose_kpt_count,
+                    skeleton=body.pose_skeleton,
+                )
+            else:
+                pose_cfg = coco17_config()
+            pose_cfg = normalize_pose_config(pose_cfg)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail={"code": "bad_pose", "message": str(e)}) from e
+        meta = dataset_storage.read_meta(root)
+        meta["pose"] = pose_cfg
+        meta["task_type"] = "pose"
+        dataset_storage.write_meta(root, meta)
+
     ds = Dataset(
         name=name,
         path=str(root),
@@ -442,7 +468,7 @@ def prelabel_status(
     meta = dataset_storage.read_meta(root)
     meta["classes"] = classes if isinstance(classes, list) else []
     dataset_storage.write_meta(root, meta)
-    info = dataset_prelabel.analyze_prelabel(root)
+    info = dataset_prelabel.analyze_prelabel(root, ds.task_type or "detect")
     reason = dataset_prelabel.prelabel_block_reason(info)
     task = (
         db.query(TrainTask)
@@ -485,14 +511,6 @@ async def start_prelabel(
 ) -> JobOut:
     """启动 AI 预标注（短训 + 推理未标注图）。"""
     ds = _get_accessible(db, dataset_id, user)
-    if (ds.task_type or "detect") != "detect":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "prelabel_not_ready",
-                "message": "实例分割预标注将在二期开放（计划支持 SAM 与 AI 短训预标注）",
-            },
-        )
     root = Path(ds.path)
     try:
         classes = json.loads(ds.classes_json or "[]")
@@ -502,7 +520,7 @@ async def start_prelabel(
     meta["classes"] = classes if isinstance(classes, list) else []
     dataset_storage.write_meta(root, meta)
 
-    info = dataset_prelabel.analyze_prelabel(root)
+    info = dataset_prelabel.analyze_prelabel(root, ds.task_type or "detect")
     reason = dataset_prelabel.prelabel_block_reason(info)
     if reason:
         raise HTTPException(status_code=400, detail={"code": "prelabel_blocked", "message": reason})
@@ -616,6 +634,63 @@ def put_classes(
     return {"classes": classes, "purge": purge_info}
 
 
+@router.get("/{dataset_id}/pose-skeleton", response_model=PoseSkeletonOut)
+def get_pose_skeleton(
+    dataset_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PoseSkeletonOut:
+    """读取姿态数据集的关键点骨架配置。"""
+    ds = _get_accessible(db, dataset_id, user)
+    if (ds.task_type or "detect") != "pose":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "not_pose", "message": "仅姿态估计数据集支持骨架配置"},
+        )
+    from app.services.pose_skeleton import pose_config_from_meta
+
+    cfg = pose_config_from_meta(dataset_storage.read_meta(Path(ds.path)))
+    return PoseSkeletonOut.model_validate(cfg)
+
+
+@router.put("/{dataset_id}/pose-skeleton", response_model=PoseSkeletonOut)
+def put_pose_skeleton(
+    dataset_id: int,
+    body: PoseSkeletonUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> PoseSkeletonOut:
+    """更新姿态骨架（建议在标注前配置；已有标注时关键点数变化可能导致旧标签需重标）。"""
+    ds = _get_accessible(db, dataset_id, user)
+    if (ds.task_type or "detect") != "pose":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "not_pose", "message": "仅姿态估计数据集支持骨架配置"},
+        )
+    from app.services.pose_skeleton import coco17_config, custom_config, normalize_pose_config
+
+    try:
+        tpl = (body.template or "coco17").strip().lower()
+        if tpl == "custom":
+            cfg = custom_config(
+                kpt_names=body.kpt_names,
+                kpt_count=body.kpt_count,
+                skeleton=body.skeleton,
+                flip_idx=body.flip_idx,
+            )
+        else:
+            cfg = coco17_config()
+        cfg = normalize_pose_config(cfg)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": "bad_pose", "message": str(e)}) from e
+    root = Path(ds.path)
+    meta = dataset_storage.read_meta(root)
+    meta["pose"] = cfg
+    meta["task_type"] = "pose"
+    dataset_storage.write_meta(root, meta)
+    return PoseSkeletonOut.model_validate(cfg)
+
+
 @router.get("/{dataset_id}/annotations/{image_name}", response_model=AnnotationOut)
 def get_annotation(
     dataset_id: int,
@@ -623,16 +698,20 @@ def get_annotation(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AnnotationOut:
-    """读取单张图标注（检测 boxes / 分割 polygons）。"""
+    """读取单张图标注（检测 boxes / 分割 polygons / 姿态 poses）。"""
     ds = _get_accessible(db, dataset_id, user)
     if not dataset_storage.is_safe_image_name(image_name):
         raise HTTPException(status_code=400, detail={"code": "bad_name", "message": "非法文件名"})
     root = Path(ds.path)
-    if (ds.task_type or "detect") == "segment":
+    tt = ds.task_type or "detect"
+    if tt == "segment":
         polygons = dataset_annotate.read_polygons(root, image_name)
-        return AnnotationOut(image=image_name, boxes=[], polygons=polygons)
+        return AnnotationOut(image=image_name, boxes=[], polygons=polygons, poses=[])
+    if tt == "pose":
+        poses = dataset_annotate.read_poses(root, image_name)
+        return AnnotationOut(image=image_name, boxes=[], polygons=[], poses=poses)
     boxes = dataset_annotate.read_annotations(root, image_name)
-    return AnnotationOut(image=image_name, boxes=boxes, polygons=[])
+    return AnnotationOut(image=image_name, boxes=boxes, polygons=[], poses=[])
 
 
 @router.put("/{dataset_id}/annotations/{image_name}", response_model=AnnotationOut)
@@ -652,8 +731,50 @@ def put_annotation(
     if not img_path.exists():
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
     root = Path(ds.path)
-    if (ds.task_type or "detect") == "segment":
+    tt = ds.task_type or "detect"
+    if tt == "segment":
         dataset_annotate.write_polygons(root, image_name, body.polygons)
-        return AnnotationOut(image=image_name, boxes=[], polygons=body.polygons)
+        return AnnotationOut(image=image_name, boxes=[], polygons=body.polygons, poses=[])
+    if tt == "pose":
+        dataset_annotate.write_poses(root, image_name, body.poses)
+        return AnnotationOut(image=image_name, boxes=[], polygons=[], poses=body.poses)
     dataset_annotate.write_annotations(root, image_name, body.boxes)
-    return AnnotationOut(image=image_name, boxes=body.boxes, polygons=[])
+    return AnnotationOut(image=image_name, boxes=body.boxes, polygons=[], poses=[])
+
+@router.post("/{dataset_id}/sam-assist", response_model=SamAssistOut)
+def sam_assist_point(
+    dataset_id: int,
+    body: SamAssistRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SamAssistOut:
+    """
+    分割标注辅助：用 SAM2（sam2_b.pt）对图片上的一点做提示分割，
+    返回归一化多边形，由前端写入当前类别。
+    """
+    ds = _get_accessible(db, dataset_id, user)
+    if (ds.task_type or "detect") != "segment":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "not_segment", "message": "仅实例分割数据集支持 SAM 辅助标注"},
+        )
+    if not dataset_storage.is_safe_image_name(body.image):
+        raise HTTPException(status_code=400, detail={"code": "bad_name", "message": "非法文件名"})
+    img_path = Path(ds.path) / "images" / body.image
+    if not img_path.is_file():
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "图片不存在"})
+    try:
+        result = sam_assist.predict_polygon_from_point(
+            img_path,
+            x_norm=body.x,
+            y_norm=body.y,
+            positive=body.positive,
+        )
+    except sam_assist.SamAssistError as e:
+        raise HTTPException(status_code=400, detail={"code": e.code, "message": e.message}) from e
+    return SamAssistOut(
+        points=result["points"],
+        model=str(result.get("model") or "sam2_b.pt"),
+        width=int(result.get("width") or 0),
+        height=int(result.get("height") or 0),
+    )

@@ -385,6 +385,7 @@ def _mock_prelabel(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> No
             job_id=job.id,
             update_progress=update_progress,
             is_cancelled=lambda: _cancelled(job.id),
+            task_type=ds.task_type or "detect",
         )
         job.status = "completed"
         job.progress = 100

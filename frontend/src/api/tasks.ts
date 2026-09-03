@@ -164,6 +164,7 @@ export interface DetectItem {
   confidence: number
   bbox_xyxy: number[]
   polygon?: number[][] | null
+  keypoints?: number[][] | null
 }
 
 export interface PredictResult {

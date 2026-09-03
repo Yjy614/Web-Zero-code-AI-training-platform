@@ -4,6 +4,7 @@
  * 卡片：右上角删除；下方 PT / ONNX 按钮样式统一；转 ONNX 时按钮内淡进度条。
  */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Box, Close, Download } from '@element-plus/icons-vue'
 import {
@@ -14,11 +15,15 @@ import {
   listModels,
   type ModelItem,
 } from '@/api/tasks'
+import { taskTypeLabel } from '@/utils/taskType'
+
+const route = useRoute()
 
 const TASK_FILTERS = [
   { value: 'all', label: '全部' },
   { value: 'detect', label: '目标检测' },
   { value: 'segment', label: '实例分割' },
+  { value: 'pose', label: '姿态估计' },
 ]
 
 const loading = ref(false)
@@ -26,6 +31,12 @@ const models = ref<ModelItem[]>([])
 const activeType = ref('all')
 const query = ref('')
 
+function applyTypeFromQuery() {
+  const t = String(route.query.type || '').trim().toLowerCase()
+  if (t === 'detect' || t === 'segment' || t === 'pose' || t === 'all') {
+    activeType.value = t
+  }
+}
 /** 各模型 ONNX 转格式进度：modelId -> { progress, message } */
 const onnxBusy = reactive<Record<number, { progress: number; message: string }>>({})
 const pollTimers = new Map<number, number>()
@@ -232,7 +243,10 @@ watch(activeType, () => {
   void load()
 })
 
-onMounted(load)
+onMounted(() => {
+  applyTypeFromQuery()
+  void load()
+})
 
 onUnmounted(() => {
   for (const id of [...pollTimers.keys()]) stopOnnxPoll(id)
@@ -299,9 +313,13 @@ onUnmounted(() => {
             <div class="meta">
               <span
                 class="tag"
-                :class="(row.task_type || 'detect') === 'segment' ? 'tag-segment' : 'tag-detect'"
+                :class="{
+                  'tag-segment': (row.task_type || 'detect') === 'segment',
+                  'tag-pose': (row.task_type || 'detect') === 'pose',
+                  'tag-detect': !['segment', 'pose'].includes(row.task_type || 'detect'),
+                }"
               >
-                {{ row.task_type || 'detect' }}
+                {{ taskTypeLabel(row.task_type) }}
               </span>
               <span class="meta-time">{{ formatTime(row.created_at) }}</span>
             </div>
@@ -365,6 +383,7 @@ onUnmounted(() => {
       <p>
         <template v-if="query">无匹配「{{ query }}」的模型。</template>
         <template v-else-if="activeType === 'segment'">暂无实例分割训练产出模型。</template>
+        <template v-else-if="activeType === 'pose'">暂无姿态估计训练产出模型。</template>
         <template v-else-if="activeType === 'detect'">暂无目标检测训练产出模型。</template>
         <template v-else>完成训练后，模型会出现在这里。</template>
       </p>
@@ -588,6 +607,10 @@ onUnmounted(() => {
 .tag-segment {
   background: var(--brand-mist);
   color: var(--brand-deep);
+}
+.tag-pose {
+  background: #eef6f4;
+  color: #1f6b5c;
 }
 .metric-row {
   display: grid;

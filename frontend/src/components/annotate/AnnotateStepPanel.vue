@@ -1,26 +1,31 @@
 <script setup lang="ts">
 /**
- * 标注步骤面板：检测矩形框 / 分割连点多边形。
- * 分割预标注二期再做（SAM + AI 短训）。
+ * 标注步骤面板：检测矩形框 / 分割多边形 / 姿态框+关键点。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BBoxAnnotatorCanvas from '@/components/annotate/BBoxAnnotatorCanvas.vue'
 import PolygonAnnotatorCanvas from '@/components/annotate/PolygonAnnotatorCanvas.vue'
+import PoseAnnotatorCanvas from '@/components/annotate/PoseAnnotatorCanvas.vue'
 import { cancelJob, getJob } from '@/api/tasks'
 import {
   fetchImageObjectUrl,
   getAnnotation,
   getClasses,
+  getPoseSkeleton,
   getPrelabelStatus,
   listImages,
   putAnnotation,
   putClasses,
+  putPoseSkeleton,
   revertPrelabel,
+  samAssist,
   startPrelabel,
   type BBox,
   type ImageItem,
   type PolygonInstance,
+  type PoseInstance,
+  type PoseSkeleton,
   type PrelabelStatus,
 } from '@/api/datasets'
 import { classAccent } from '@/utils/classColors'
@@ -29,6 +34,8 @@ import type { WizardTaskType } from '@/composables/useWizardSteps'
 const props = defineProps<{
   datasetId: number
   taskType?: WizardTaskType
+  /** 嵌入侧栏/抽屉时隐藏向导「下一步/返回清洗」与顶部说明 */
+  embedded?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -37,6 +44,14 @@ const emit = defineEmits<{
 }>()
 
 const isSegment = computed(() => props.taskType === 'segment')
+const isPose = computed(() => props.taskType === 'pose')
+const isDetect = computed(() => !isSegment.value && !isPose.value)
+/** 一期姿态不做预标注 */
+const showPrelabel = computed(() => !isPose.value)
+
+/** 分割标注模式：点选连点 / SAM2 单击 */
+const segMode = ref<'point' | 'sam'>('point')
+const samBusy = ref(false)
 
 const loading = ref(false)
 const images = ref<ImageItem[]>([])
@@ -46,6 +61,11 @@ const currentClassId = ref(0)
 const imageIndex = ref(0)
 const boxes = ref<BBox[]>([])
 const polygons = ref<PolygonInstance[]>([])
+const poses = ref<PoseInstance[]>([])
+const poseSkeleton = ref<PoseSkeleton | null>(null)
+const poseTemplate = ref<'coco17' | 'custom'>('coco17')
+const customKptCount = ref(5)
+const customKptNamesText = ref('')
 const imageUrl = ref('')
 let objectUrlToRevoke: string | null = null
 let navigating = false
@@ -61,22 +81,102 @@ let prelabelPollTimer: number | null = null
 const activeImages = computed(() => images.value.filter((i) => i.status === 'active'))
 const currentImage = computed(() => activeImages.value[imageIndex.value] || null)
 const canPrelabel = computed(
-  () =>
-    !isSegment.value &&
-    Boolean(prelabelInfo.value?.can_prelabel) &&
-    !prelabelRunning.value,
+  () => Boolean(prelabelInfo.value?.can_prelabel) && !prelabelRunning.value,
 )
 const canRevertPrelabel = computed(
-  () =>
-    !isSegment.value &&
-    Boolean(prelabelInfo.value?.last_written?.length) &&
-    !prelabelRunning.value,
+  () => Boolean(prelabelInfo.value?.last_written?.length) && !prelabelRunning.value,
 )
 const prelabelHint = computed(() => {
-  if (isSegment.value) return '实例分割预标注将在二期开放（SAM + AI 短训）'
   if (prelabelRunning.value) return '预标注进行中，请稍候…'
-  return prelabelInfo.value?.block_reason || ''
+  if (prelabelInfo.value?.block_reason) return prelabelInfo.value.block_reason
+  if (isPose.value) return '姿态估计一期请人工标注框与关键点'
+  if (isSegment.value) {
+    return segMode.value === 'sam'
+      ? 'SAM 模式：在目标上单击即可生成轮廓'
+      : '点选模式：单击加点，双击或 Enter 闭合'
+  }
+  return ''
 })
+
+const poseKptNames = computed(() => poseSkeleton.value?.kpt_names || [])
+const poseEdges = computed(() => poseSkeleton.value?.skeleton || [])
+
+async function loadPoseSkeleton() {
+  if (!isPose.value) {
+    poseSkeleton.value = null
+    return
+  }
+  try {
+    const { data } = await getPoseSkeleton(props.datasetId)
+    poseSkeleton.value = data
+    poseTemplate.value = data.template === 'custom' ? 'custom' : 'coco17'
+    customKptCount.value = data.kpt_shape?.[0] || data.kpt_names?.length || 5
+    customKptNamesText.value = (data.kpt_names || []).join(', ')
+  } catch {
+    poseSkeleton.value = null
+  }
+}
+
+async function applyPoseSkeleton() {
+  if (!isPose.value) return
+  try {
+    const body =
+      poseTemplate.value === 'custom'
+        ? {
+            template: 'custom',
+            kpt_count: customKptCount.value,
+            kpt_names: customKptNamesText.value
+              .split(/[,，\s]+/)
+              .map((s) => s.trim())
+              .filter(Boolean),
+          }
+        : { template: 'coco17' }
+    const { data } = await putPoseSkeleton(props.datasetId, body)
+    poseSkeleton.value = data
+    ElMessage.success(`已应用骨架：${data.kpt_names.length} 个关键点`)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : '保存骨架失败'
+    ElMessage.error(msg)
+  }
+}
+
+function toggleSegMode() {
+  if (samBusy.value) return
+  segMode.value = segMode.value === 'point' ? 'sam' : 'point'
+}
+
+async function onSamClick(pt: { x: number; y: number }) {
+  if (!isSegment.value || segMode.value !== 'sam') return
+  if (!currentImage.value) return
+  if (!classes.value.length) {
+    ElMessage.warning('请先添加类别')
+    return
+  }
+  if (samBusy.value) return
+  samBusy.value = true
+  try {
+    const { data } = await samAssist(props.datasetId, {
+      image: currentImage.value.name,
+      x: pt.x,
+      y: pt.y,
+      positive: true,
+    })
+    const points = (data.points || []).map((p) => ({ x: p.x, y: p.y }))
+    if (points.length < 3) {
+      ElMessage.warning('SAM 未得到有效轮廓，请换位置再点')
+      return
+    }
+    polygons.value = [
+      ...polygons.value,
+      { class_id: currentClassId.value, points },
+    ]
+    ElMessage.success('已添加 SAM 轮廓')
+  } catch {
+    // 拦截器提示
+  } finally {
+    samBusy.value = false
+  }
+}
 
 function revokeUrl() {
   if (objectUrlToRevoke) {
@@ -93,10 +193,6 @@ function stopPrelabelPoll() {
 }
 
 async function refreshPrelabelStatus() {
-  if (isSegment.value) {
-    prelabelInfo.value = null
-    return
-  }
   const { data } = await getPrelabelStatus(props.datasetId)
   prelabelInfo.value = data
   if (data.running_job_id && !prelabelRunning.value) {
@@ -129,6 +225,7 @@ async function loadClasses() {
 async function loadCurrentAnnotation() {
   boxes.value = []
   polygons.value = []
+  poses.value = []
   if (!currentImage.value) {
     revokeUrl()
     imageUrl.value = ''
@@ -153,9 +250,11 @@ async function loadCurrentAnnotation() {
     const { data } = await getAnnotation(props.datasetId, name)
     boxes.value = data.boxes || []
     polygons.value = data.polygons || []
+    poses.value = data.poses || []
   } catch {
     boxes.value = []
     polygons.value = []
+    poses.value = []
   }
 }
 
@@ -165,6 +264,8 @@ async function saveAnnotation(showToast = true) {
     await putAnnotation(props.datasetId, currentImage.value.name, {
       polygons: polygons.value,
     })
+  } else if (isPose.value) {
+    await putAnnotation(props.datasetId, currentImage.value.name, { poses: poses.value })
   } else {
     await putAnnotation(props.datasetId, currentImage.value.name, { boxes: boxes.value })
   }
@@ -355,6 +456,10 @@ async function pollPrelabelJob(jobId: number) {
 }
 
 async function onPrelabel() {
+  if (isPose.value) {
+    ElMessage.info('姿态估计预标注将在后续版本开放')
+    return
+  }
   if (isSegment.value) {
     ElMessage.info('实例分割预标注将在二期开放')
     return
@@ -380,7 +485,13 @@ async function onPrelabel() {
   try {
     // 此时已锁屏，需绕过 flushSave 的 running 守卫强制落盘
     if (currentImage.value) {
-      await putAnnotation(props.datasetId, currentImage.value.name, { boxes: boxes.value })
+      if (isSegment.value) {
+        await putAnnotation(props.datasetId, currentImage.value.name, { polygons: polygons.value })
+      } else if (isPose.value) {
+        await putAnnotation(props.datasetId, currentImage.value.name, { poses: poses.value })
+      } else {
+        await putAnnotation(props.datasetId, currentImage.value.name, { boxes: boxes.value })
+      }
     }
     const { data } = await startPrelabel(props.datasetId)
     prelabelJobId.value = data.id
@@ -412,7 +523,7 @@ async function onRevertPrelabel() {
   const n = prelabelInfo.value?.last_written?.length || 0
   try {
     await ElMessageBox.confirm(
-      `将删除本轮 AI 预标注写入的 ${n} 张图上的全部标注框。若你已手动修改过这些图，修改也会一并清除。训练成功后预标注会自动确认为用户标注，届时无需再清除。是否继续？`,
+      `将删除本轮 AI 预标注写入的 ${n} 张图上的全部标注。若你已手动修改过这些图，修改也会一并清除。训练成功后预标注会自动确认为用户标注，届时无需再清除。是否继续？`,
       '清除本轮 AI 预标注',
       { type: 'warning', confirmButtonText: '清除', cancelButtonText: '取消' },
     )
@@ -433,9 +544,10 @@ async function bootstrap() {
   try {
     await refreshImages()
     await loadClasses()
+    await loadPoseSkeleton()
     imageIndex.value = 0
     await loadCurrentAnnotation()
-    await refreshPrelabelStatus()
+    if (showPrelabel.value) await refreshPrelabelStatus()
   } finally {
     loading.value = false
   }
@@ -462,24 +574,54 @@ defineExpose({ flushSave })
 </script>
 
 <template>
-  <div class="step-body annotate" v-loading="loading">
-    <h3>步骤 3 · 标注</h3>
-    <p class="muted intro">
-      <template v-if="isSegment">
-        使用连点多边形标注实例轮廓。单击加点，双击或 Enter
-        闭合。切换图片或进入下一步时会自动保存。预标注（SAM / AI 短训）将在后续版本开放。
-      </template>
-      <template v-else>
-        可先手工标注部分图片，再使用 AI 预标注自动补全剩余图片（结果请人工复核）。切换图片或进入下一步时会自动保存标注。训练成功后，本轮预标注将自动视为用户标注，「清除本轮
-        AI 预标注」将不再可用。
-      </template>
-    </p>
+  <div class="step-body annotate" :class="{ embedded: embedded }" v-loading="loading">
+    <template v-if="!embedded">
+      <h3>步骤 3 · 标注</h3>
+      <p class="muted intro">
+        <template v-if="isPose">
+          先配置骨架（COCO-17 或自定义点数），再画框并标注关键点。切换图片或进入下一步时会自动保存。
+        </template>
+        <template v-else-if="isSegment">
+          可用点选或 SAM 标注部分图片，再用 AI 预标注补全其余图片（结果请人工复核）。切换图片或进入下一步时会自动保存。
+        </template>
+        <template v-else>
+          可先手工标注部分图片，再使用 AI 预标注自动补全剩余图片（结果请人工复核）。切换图片或进入下一步时会自动保存标注。训练成功后，本轮预标注将自动视为用户标注，「清除本轮
+          AI 预标注」将不再可用。
+        </template>
+      </p>
+    </template>
     <div class="annotate-layout" :class="{ locked: prelabelRunning }">
       <aside class="side">
+        <div v-if="isPose" class="class-box pose-box">
+          <strong>骨架模板</strong>
+          <el-radio-group v-model="poseTemplate" size="small" class="pose-tpl">
+            <el-radio-button label="coco17">COCO-17</el-radio-button>
+            <el-radio-button label="custom">自定义</el-radio-button>
+          </el-radio-group>
+          <div v-if="poseTemplate === 'custom'" class="pose-custom">
+            <el-input-number v-model="customKptCount" :min="1" :max="64" size="small" />
+            <el-input
+              v-model="customKptNamesText"
+              type="textarea"
+              :rows="2"
+              size="small"
+              placeholder="可选：点名，逗号分隔；空则自动 kpt_0…"
+            />
+            <p class="muted prelabel-tip">
+              自定义点数时，请使用匹配的 pose 权重或接受从头适配；COCO-17 可直接用官方 *-pose.pt
+            </p>
+          </div>
+          <el-button size="small" type="primary" plain @click="applyPoseSkeleton">应用骨架</el-button>
+          <p v-if="poseSkeleton" class="muted prelabel-tip">
+            当前 {{ poseSkeleton.kpt_names.length }} 点 · {{ poseSkeleton.template }}
+          </p>
+        </div>
         <div class="class-box">
           <strong>类别</strong>
           <p v-if="!classes.length" class="muted class-hint">
-            暂无类别，请先添加后再{{ isSegment ? '画多边形' : '画框' }}标注
+            暂无类别，请先添加后再{{
+              isSegment ? '画多边形' : isPose ? '画框并标关键点' : '画框'
+            }}标注
           </p>
           <div class="class-list">
             <button
@@ -536,17 +678,30 @@ defineExpose({ flushSave })
             </el-button>
           </div>
           <div class="nav-stack">
+            <div class="nav-row">
+              <el-button
+                type="success"
+                plain
+                :disabled="prelabelRunning || unlabeledIndices.length === 0"
+                @click="jumpToNextUnlabeled"
+              >
+                未标注图片
+                <template v-if="unlabeledIndices.length">（{{ unlabeledIndices.length }}）</template>
+              </el-button>
+              <el-button
+                v-if="isSegment"
+                type="primary"
+                :plain="segMode !== 'sam'"
+                :disabled="samBusy || prelabelRunning"
+                :loading="samBusy"
+                :title="segMode === 'point' ? '点击切换到 SAM 模式' : '点击切换到点选模式'"
+                @click="toggleSegMode"
+              >
+                {{ segMode === 'point' ? '点选' : 'SAM' }}
+              </el-button>
+            </div>
             <el-button
-              type="success"
-              plain
-              :disabled="prelabelRunning || unlabeledIndices.length === 0"
-              @click="jumpToNextUnlabeled"
-            >
-              未标注图片
-              <template v-if="unlabeledIndices.length">（{{ unlabeledIndices.length }}）</template>
-            </el-button>
-            <el-button
-              v-if="!isSegment"
+              v-if="showPrelabel"
               type="warning"
               plain
               :disabled="!canPrelabel"
@@ -555,24 +710,20 @@ defineExpose({ flushSave })
             >
               AI 预标注
             </el-button>
-            <el-button
-              v-if="!isSegment"
-              plain
-              :disabled="!canRevertPrelabel"
-              @click="onRevertPrelabel"
-            >
+            <el-button v-if="showPrelabel" plain :disabled="!canRevertPrelabel" @click="onRevertPrelabel">
               清除本轮 AI 预标注
             </el-button>
-            <p v-if="isSegment" class="muted prelabel-tip">{{ prelabelHint }}</p>
-            <p v-else-if="prelabelHint && !prelabelRunning" class="muted prelabel-tip">{{ prelabelHint }}</p>
-            <p v-else-if="prelabelInfo && !prelabelRunning" class="muted prelabel-tip">
+            <p v-if="prelabelHint && !prelabelRunning" class="muted prelabel-tip">{{ prelabelHint }}</p>
+            <p v-else-if="showPrelabel && prelabelInfo && !prelabelRunning" class="muted prelabel-tip">
               已标注 {{ prelabelInfo.labeled_count }} · 未标注 {{ prelabelInfo.unlabeled_count }}
               （需 ≥{{ prelabelInfo.min_labeled }} 张已标注）
             </p>
-            <el-button type="primary" plain :disabled="prelabelRunning" @click="emit('next')">
-              下一步：配置
-            </el-button>
-            <el-button :disabled="prelabelRunning" @click="emit('back')">返回清洗</el-button>
+            <template v-if="!embedded">
+              <el-button type="primary" plain :disabled="prelabelRunning || samBusy" @click="emit('next')">
+                下一步：配置
+              </el-button>
+              <el-button :disabled="prelabelRunning || samBusy" @click="emit('back')">返回清洗</el-button>
+            </template>
           </div>
         </div>
       </aside>
@@ -585,11 +736,26 @@ defineExpose({ flushSave })
             :polygons="polygons"
             :class-id="currentClassId"
             :classes="classes"
+            :mode="segMode"
+            :sam-busy="samBusy"
             @update:polygons="polygons = $event"
+            @navigate="onNavigate"
+            @sam-click="onSamClick"
+          />
+          <PoseAnnotatorCanvas
+            v-else-if="isPose && imageUrl && !prelabelRunning"
+            :key="`pose-${datasetId}-${currentImage?.name || ''}-${poseKptNames.length}`"
+            :image-url="imageUrl"
+            :poses="poses"
+            :class-id="currentClassId"
+            :classes="classes"
+            :kpt-names="poseKptNames"
+            :skeleton="poseEdges"
+            @update:poses="poses = $event"
             @navigate="onNavigate"
           />
           <BBoxAnnotatorCanvas
-            v-else-if="!isSegment && imageUrl && !prelabelRunning"
+            v-else-if="isDetect && imageUrl && !prelabelRunning"
             :key="`det-${datasetId}-${currentImage?.name || ''}`"
             :image-url="imageUrl"
             :boxes="boxes"
@@ -726,12 +892,18 @@ defineExpose({ flushSave })
   color: var(--ink-muted);
   min-width: 0;
 }
+.nav-box > .nav-row {
+  margin-bottom: 0.55rem;
+}
 .nav-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
   width: 100%;
-  margin-bottom: 0.55rem;
+  margin-bottom: 0;
+}
+.nav-row > :only-child {
+  grid-column: 1 / -1;
 }
 .nav-row :deep(.el-button) {
   width: 100%;
@@ -831,5 +1003,50 @@ defineExpose({ flushSave })
     inset: auto;
     min-height: 420px;
   }
+}
+
+.pose-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pose-tpl {
+  width: 100%;
+}
+.pose-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Agent 侧栏嵌入：在抽屉可视区内铺满，避免外层滚轮 */
+.annotate.embedded {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.annotate.embedded .annotate-layout {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  align-items: stretch;
+}
+.annotate.embedded .side {
+  overflow: auto;
+  max-height: 100%;
+  align-content: start;
+}
+.annotate.embedded .canvas-wrap {
+  /* 吃掉剩余宽度/高度，不再用 420px 最小高度把抽屉撑出滚动条 */
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  align-self: stretch;
+}
+.annotate.embedded .canvas-fill {
+  min-height: 0;
 }
 </style>

@@ -3,7 +3,7 @@
  * 数据集管理：卡片列表 + 任务类型筛选。
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Collection, Download, Delete, Right, Plus } from '@element-plus/icons-vue'
 import {
@@ -13,13 +13,16 @@ import {
   listDatasets,
   type DatasetItem,
 } from '@/api/datasets'
+import { taskTypeLabel } from '@/utils/taskType'
 
 const TASK_FILTERS = [
   { value: 'detect', label: '目标检测' },
   { value: 'segment', label: '实例分割' },
+  { value: 'pose', label: '姿态估计' },
 ]
 
 const router = useRouter()
+const route = useRoute()
 const loading = ref(false)
 const datasets = ref<DatasetItem[]>([])
 const createVisible = ref(false)
@@ -27,6 +30,10 @@ const newName = ref('')
 const activeType = ref('detect')
 const query = ref('')
 
+function applyTypeFromQuery() {
+  const t = String(route.query.type || '').trim().toLowerCase()
+  if (t === 'detect' || t === 'segment' || t === 'pose') activeType.value = t
+}
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   let list = datasets.value.filter((d) => (d.task_type || 'detect') === activeType.value)
@@ -57,12 +64,13 @@ async function onCreate() {
   createVisible.value = false
   newName.value = ''
   await load()
-  // 分割向导二期再开放；检测可直接进入
-  if (activeType.value === 'detect') {
-    router.push({ path: '/app/detect/wizard', query: { datasetId: String(data.id) } })
-  } else {
-    router.push({ path: '/app/segment/wizard', query: { datasetId: String(data.id) } })
-  }
+  const path =
+    activeType.value === 'segment'
+      ? '/app/segment/wizard'
+      : activeType.value === 'pose'
+        ? '/app/pose/wizard'
+        : '/app/detect/wizard'
+  router.push({ path, query: { datasetId: String(data.id) } })
 }
 
 async function onDelete(row: DatasetItem) {
@@ -89,11 +97,9 @@ async function onDownload(row: DatasetItem) {
 
 function openWizard(row: DatasetItem) {
   const tt = row.task_type || 'detect'
-  if (tt === 'segment') {
-    router.push({ path: '/app/segment/wizard', query: { datasetId: String(row.id) } })
-    return
-  }
-  router.push({ path: '/app/detect/wizard', query: { datasetId: String(row.id) } })
+  const path =
+    tt === 'segment' ? '/app/segment/wizard' : tt === 'pose' ? '/app/pose/wizard' : '/app/detect/wizard'
+  router.push({ path, query: { datasetId: String(row.id) } })
 }
 
 /** 类别数量；无类别时不展示 */
@@ -113,7 +119,10 @@ watch(activeType, () => {
   void load()
 })
 
-onMounted(load)
+onMounted(() => {
+  applyTypeFromQuery()
+  void load()
+})
 </script>
 
 <template>
@@ -173,7 +182,7 @@ onMounted(load)
           <div class="card-title">
             <h3 :title="row.name">{{ row.name }}</h3>
             <div class="meta">
-              <span class="tag">{{ row.task_type || 'detect' }}</span>
+              <span class="tag">{{ taskTypeLabel(row.task_type) }}</span>
               <span class="meta-line" :title="metaTitle(row)">
                 <span>{{ row.image_count }} 张图</span>
                 <span class="meta-sep" aria-hidden="true" />
@@ -214,7 +223,13 @@ onMounted(load)
 
     <el-dialog
       v-model="createVisible"
-      :title="activeType === 'segment' ? '新建实例分割数据集' : '新建检测数据集'"
+      :title="
+        activeType === 'segment'
+          ? '新建实例分割数据集'
+          : activeType === 'pose'
+            ? '新建姿态估计数据集'
+            : '新建检测数据集'
+      "
       width="420px"
     >
       <el-input

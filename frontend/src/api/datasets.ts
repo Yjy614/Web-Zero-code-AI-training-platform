@@ -40,10 +40,34 @@ export interface PolygonInstance {
   points: PolygonPoint[]
 }
 
+export interface PoseKeypoint {
+  x: number
+  y: number
+  v: number
+}
+
+export interface PoseInstance {
+  class_id: number
+  x_center: number
+  y_center: number
+  width: number
+  height: number
+  keypoints: PoseKeypoint[]
+}
+
+export interface PoseSkeleton {
+  template: string
+  kpt_shape: number[]
+  kpt_names: string[]
+  skeleton: number[][]
+  flip_idx: number[]
+}
+
 export interface AnnotationData {
   image: string
   boxes: BBox[]
   polygons: PolygonInstance[]
+  poses?: PoseInstance[]
 }
 
 export interface CleanResult {
@@ -57,8 +81,21 @@ export function listDatasets(taskType = 'detect') {
   return http.get<DatasetItem[]>('/datasets', { params: { task_type: taskType } })
 }
 
-export function createDataset(name: string, taskType = 'detect') {
-  return http.post<DatasetItem>('/datasets', { name, task_type: taskType })
+export function createDataset(
+  name: string,
+  taskType = 'detect',
+  poseOpts?: {
+    pose_template?: string
+    pose_kpt_names?: string[]
+    pose_kpt_count?: number
+    pose_skeleton?: number[][]
+  },
+) {
+  return http.post<DatasetItem>('/datasets', {
+    name,
+    task_type: taskType,
+    ...(poseOpts || {}),
+  })
 }
 
 export function getDataset(id: number) {
@@ -176,12 +213,43 @@ export function getAnnotation(id: number, image: string) {
 export function putAnnotation(
   id: number,
   image: string,
-  payload: { boxes?: BBox[]; polygons?: PolygonInstance[] },
+  payload: { boxes?: BBox[]; polygons?: PolygonInstance[]; poses?: PoseInstance[] },
 ) {
   return http.put<AnnotationData>(`/datasets/${id}/annotations/${encodeURIComponent(image)}`, {
     boxes: payload.boxes || [],
     polygons: payload.polygons || [],
+    poses: payload.poses || [],
   })
+}
+
+export function getPoseSkeleton(id: number) {
+  return http.get<PoseSkeleton>(`/datasets/${id}/pose-skeleton`)
+}
+
+export function putPoseSkeleton(
+  id: number,
+  body: {
+    template: string
+    kpt_names?: string[]
+    kpt_count?: number
+    skeleton?: number[][]
+    flip_idx?: number[]
+  },
+) {
+  return http.put<PoseSkeleton>(`/datasets/${id}/pose-skeleton`, body)
+}
+
+/** SAM2 点提示辅助分割：返回归一化多边形顶点。 */
+export function samAssist(
+  id: number,
+  payload: { image: string; x: number; y: number; positive?: boolean },
+) {
+  return http.post<{
+    points: { x: number; y: number }[]
+    model: string
+    width: number
+    height: number
+  }>(`/datasets/${id}/sam-assist`, payload, { timeout: 3 * 60 * 1000 })
 }
 
 /** 带鉴权拉取图片并转为 Object URL。 */

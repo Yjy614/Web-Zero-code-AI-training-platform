@@ -1,12 +1,13 @@
-"""任务类型常量（检测 / 分割）。"""
+"""任务类型常量（检测 / 分割 / 姿态）。"""
 
 from __future__ import annotations
 
-TASK_TYPES = ("detect", "segment")
+TASK_TYPES = ("detect", "segment", "pose")
 
 TASK_TYPE_LABELS = {
     "detect": "目标检测",
     "segment": "实例分割",
+    "pose": "姿态估计",
 }
 
 

@@ -2,10 +2,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
+  DEFAULT_MENU_VISIBILITY,
   fetchSettings,
   fetchSystemInfo,
+  MENU_LABEL_BY_KEY,
   updateSettings,
   type AppSettings,
+  type MenuVisibility,
   type ModelEndpointConfig,
   type SystemInfo,
 } from '@/api/system'
@@ -16,6 +19,7 @@ const auth = useAuthStore()
 const app = useAppStore()
 const loading = ref(false)
 const saving = ref(false)
+const savingMenu = ref(false)
 const info = ref<SystemInfo | null>(null)
 
 const emptyEndpoint = (): ModelEndpointConfig => ({
@@ -24,6 +28,8 @@ const emptyEndpoint = (): ModelEndpointConfig => ({
   model: '',
   timeout: 60,
   api_key_set: false,
+  thinking_enabled: true,
+  reasoning_effort: 'high',
 })
 
 const settings = reactive<AppSettings>({
@@ -31,9 +37,12 @@ const settings = reactive<AppSettings>({
   job_runner: 'mock',
   forbid_weight_download: true,
   free_step_nav: true,
+  menu_visibility: { ...DEFAULT_MENU_VISIBILITY },
   llm: emptyEndpoint(),
   vision: emptyEndpoint(),
 })
+
+const menuKeys = Object.keys(MENU_LABEL_BY_KEY) as Array<keyof MenuVisibility>
 
 const canEdit = computed(() => auth.isAdmin)
 
@@ -45,7 +54,12 @@ onMounted(async () => {
     Object.assign(settings, settingsRes.data)
     settings.llm = { ...emptyEndpoint(), ...(settingsRes.data.llm || {}) }
     settings.vision = { ...emptyEndpoint(), ...(settingsRes.data.vision || {}) }
+    settings.menu_visibility = {
+      ...DEFAULT_MENU_VISIBILITY,
+      ...(settingsRes.data.menu_visibility || {}),
+    }
     app.demoMode = settings.demo_mode
+    app.setMenuVisibility(settings.menu_visibility)
   } finally {
     loading.value = false
   }
@@ -59,6 +73,10 @@ async function onToggleDemo(val: string | number | boolean) {
     Object.assign(settings, data)
     settings.llm = { ...emptyEndpoint(), ...(data.llm || {}) }
     settings.vision = { ...emptyEndpoint(), ...(data.vision || {}) }
+    settings.menu_visibility = {
+      ...DEFAULT_MENU_VISIBILITY,
+      ...(data.menu_visibility || {}),
+    }
     app.demoMode = data.demo_mode
     ElMessage.success(
       enabled
@@ -67,6 +85,22 @@ async function onToggleDemo(val: string | number | boolean) {
     )
   } catch {
     settings.demo_mode = !enabled
+  }
+}
+
+async function saveMenuVisibility() {
+  if (!canEdit.value) return
+  savingMenu.value = true
+  try {
+    const { data } = await updateSettings({ menu_visibility: { ...settings.menu_visibility } })
+    settings.menu_visibility = {
+      ...DEFAULT_MENU_VISIBILITY,
+      ...(data.menu_visibility || {}),
+    }
+    app.setMenuVisibility(settings.menu_visibility)
+    ElMessage.success('功能入口显示设置已保存，所有用户立即生效')
+  } finally {
+    savingMenu.value = false
   }
 }
 
@@ -82,6 +116,8 @@ async function saveEndpoint(kind: 'llm' | 'vision') {
               api_key: settings.llm.api_key,
               model: settings.llm.model,
               timeout: settings.llm.timeout,
+              thinking_enabled: Boolean(settings.llm.thinking_enabled),
+              reasoning_effort: settings.llm.reasoning_effort || 'high',
             },
           }
         : {
@@ -96,6 +132,10 @@ async function saveEndpoint(kind: 'llm' | 'vision') {
     Object.assign(settings, data)
     settings.llm = { ...emptyEndpoint(), ...(data.llm || {}) }
     settings.vision = { ...emptyEndpoint(), ...(data.vision || {}) }
+    settings.menu_visibility = {
+      ...DEFAULT_MENU_VISIBILITY,
+      ...(data.menu_visibility || {}),
+    }
     ElMessage.success(kind === 'llm' ? '大模型配置已保存' : '视觉模型配置已保存')
   } finally {
     saving.value = false
@@ -153,11 +193,49 @@ async function saveEndpoint(kind: 'llm' | 'vision') {
       </div>
 
       <div class="block wide">
+        <h3>功能入口显示</h3>
+        <p class="hint">
+          由管理员控制侧栏各功能是否对<strong>所有用户</strong>显示。关闭后，用户侧栏不再出现该入口，直接访问对应地址也会被拦截。关闭「系统设置」仅对普通用户生效，管理员仍可进入本页；用户管理仅管理员可见。
+        </p>
+        <div class="menu-vis-grid">
+          <label v-for="key in menuKeys" :key="key" class="menu-vis-item">
+            <span>{{ MENU_LABEL_BY_KEY[key] }}</span>
+            <el-switch v-model="settings.menu_visibility[key]" :disabled="!canEdit" />
+          </label>
+        </div>
+        <el-button
+          v-if="canEdit"
+          type="primary"
+          :loading="savingMenu"
+          style="margin-top: 0.75rem"
+          @click="saveMenuVisibility"
+        >
+          保存功能入口设置
+        </el-button>
+      </div>
+
+      <div class="block wide">
         <h3>大模型（LLM）</h3>
-        <p class="hint">演示期可不真实调用，配置将保存在服务器供后续预标注/建议使用。</p>
+        <p class="hint">
+          对话式 Agent 使用此配置。思考模式对应 DeepSeek 官方
+          <code>thinking</code> /
+          <code>reasoning_effort</code>
+          （见
+          <a
+            href="https://api-docs.deepseek.com/zh-cn/guides/thinking_mode"
+            target="_blank"
+            rel="noopener noreferrer"
+            >思考模式文档</a
+          >）。开启后会返回 <code>reasoning_content</code> 并在对话中展示。Base URL 一般为
+          <code>https://api.deepseek.com</code>。
+        </p>
         <div class="form-grid">
           <label>Base URL</label>
-          <el-input v-model="settings.llm.base_url" :disabled="!canEdit" placeholder="https://..." />
+          <el-input
+            v-model="settings.llm.base_url"
+            :disabled="!canEdit"
+            placeholder="https://api.deepseek.com"
+          />
           <label>API Key</label>
           <el-input
             v-model="settings.llm.api_key"
@@ -167,9 +245,30 @@ async function saveEndpoint(kind: 'llm' | 'vision') {
             :placeholder="settings.llm.api_key_set ? '已配置（留空掩码则不修改）' : '可选'"
           />
           <label>Model</label>
-          <el-input v-model="settings.llm.model" :disabled="!canEdit" placeholder="模型名" />
+          <el-input
+            v-model="settings.llm.model"
+            :disabled="!canEdit"
+            placeholder="如 deepseek-chat / deepseek-v4-pro"
+          />
           <label>Timeout(秒)</label>
           <el-input-number v-model="settings.llm.timeout" :disabled="!canEdit" :min="5" :max="600" />
+          <label>思考模式</label>
+          <el-switch
+            v-model="settings.llm.thinking_enabled"
+            :disabled="!canEdit"
+            active-text="开启"
+            inactive-text="关闭"
+          />
+          <label>思考强度</label>
+          <el-select
+            v-model="settings.llm.reasoning_effort"
+            :disabled="!canEdit || !settings.llm.thinking_enabled"
+            style="width: 100%"
+          >
+            <el-option label="low（更快）" value="low" />
+            <el-option label="high（默认）" value="high" />
+            <el-option label="max（更强）" value="max" />
+          </el-select>
         </div>
         <el-button v-if="canEdit" type="primary" :loading="saving" @click="saveEndpoint('llm')">
           保存大模型配置
@@ -280,6 +379,24 @@ dl > div {
   grid-template-columns: 120px 1fr;
   gap: 0.5rem;
   font-size: 0.9rem;
+}
+.menu-vis-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.65rem 1rem;
+  margin-top: 0.85rem;
+}
+.menu-vis-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7fafb;
+  font-size: 0.9rem;
+  color: var(--ink);
 }
 dt {
   color: var(--ink-faint);

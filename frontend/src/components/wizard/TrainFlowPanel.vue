@@ -268,7 +268,7 @@ type ConfigDraft = {
 }
 
 function draftStorageKey() {
-  const tt = props.taskType === 'segment' ? 'segment' : 'detect'
+  const tt = props.taskType === 'segment' ? 'segment' : props.taskType === 'pose' ? 'pose' : 'detect'
   return trainConfigDraftKey(tt, props.datasetId)
 }
 
@@ -670,7 +670,7 @@ function renderChart() {
 }
 
 async function loadWeights() {
-  const tt = props.taskType === 'segment' ? 'segment' : 'detect'
+  const tt = props.taskType === 'segment' ? 'segment' : props.taskType === 'pose' ? 'pose' : 'detect'
   const { data } = await listWeights(tt)
   weights.value = data
   const current = sanitizeWeightName(config.pretrained_weight)
@@ -749,11 +749,13 @@ watch(
 )
 
 onMounted(async () => {
-  await loadWeights()
   try {
     await ensureTask()
+    // 先恢复任务/草稿配置，再按任务类型拉权重并校正非法权重名
+    await Promise.all([loadWeights(), loadDevices()])
     await resumeActiveTrainJob()
   } catch {
+    await loadWeights()
     // 首次进入可稍后创建
   }
   window.addEventListener('resize', () => chart?.resize())

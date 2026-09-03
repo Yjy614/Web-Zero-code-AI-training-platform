@@ -14,6 +14,7 @@ import {
   type WeightTaskTypeItem,
 } from '@/api/tasks'
 import { useAuthStore } from '@/stores/auth'
+import { taskTypeLabel } from '@/utils/taskType'
 
 const auth = useAuthStore()
 const loading = ref(false)
@@ -21,6 +22,7 @@ const weights = ref<WeightItem[]>([])
 const taskTypes = ref<WeightTaskTypeItem[]>([
   { task_type: 'detect', label: '目标检测', enabled: true },
   { task_type: 'segment', label: '实例分割', enabled: true },
+  { task_type: 'pose', label: '姿态估计', enabled: true },
 ])
 const activeType = ref('detect')
 const query = ref('')
@@ -39,7 +41,13 @@ const totalSize = computed(() => weights.value.reduce((s, w) => s + (w.size || 0
 async function loadTypes() {
   try {
     const { data } = await listWeightTaskTypes()
-    if (data.items?.length) taskTypes.value = data.items
+    if (data.items?.length) {
+      // 后端 label 兜底：统一用中文映射，避免 pose 显示英文
+      taskTypes.value = data.items.map((t) => ({
+        ...t,
+        label: taskTypeLabel(t.task_type) || t.label,
+      }))
+    }
   } catch {
     // 默认分栏
   }
@@ -175,7 +183,7 @@ onMounted(async () => {
         <div class="card-body">
           <h3 :title="row.name">{{ row.name }}</h3>
           <div class="meta">
-            <span class="tag">{{ row.task_type || activeType }}</span>
+            <span class="tag">{{ taskTypeLabel(row.task_type || activeType) }}</span>
             <span>{{ formatSize(row.size) }}</span>
           </div>
         </div>

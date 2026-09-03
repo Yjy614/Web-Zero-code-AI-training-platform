@@ -3,14 +3,19 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Aim,
+  ArrowDown,
   Box,
   Collection,
   Cpu,
   Crop,
+  List,
+  MagicStick,
   PictureFilled,
   Setting,
   SwitchButton,
   User,
+  Share,
+  VideoCamera,
 } from '@element-plus/icons-vue'
 import DemoBanner from '@/components/DemoBanner.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -21,30 +26,61 @@ const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 const collapsed = ref(false)
+/** 训练向导折叠组：默认收起，仅用户点击展开 */
+const wizardOpen = ref(false)
 
 const active = computed(() => route.path)
 
-const menus = computed(() => {
-  const items = [
-    { path: '/app/detect/wizard', title: '目标检测训练', icon: Aim },
-    { path: '/app/segment/wizard', title: '实例分割训练', icon: Crop },
-    { path: '/app/resources/datasets', title: '数据集管理', icon: Collection },
-    { path: '/app/resources/models', title: '模型库', icon: Box },
-    { path: '/app/resources/infer', title: '推理试用', icon: PictureFilled },
-    { path: '/app/resources/weights', title: '基础模型权重仓库', icon: Cpu },
-    { path: '/app/settings', title: '系统设置', icon: Setting },
-  ]
+type MenuItem = { path: string; title: string; icon: typeof Aim; key?: string }
+
+const wizardChildren = computed((): MenuItem[] => {
+  const vis = app.menuVisibility
+  return [
+    { path: '/app/detect/wizard', title: '目标检测训练', icon: Aim, key: 'detect_wizard' },
+    { path: '/app/segment/wizard', title: '实例分割训练', icon: Crop, key: 'segment_wizard' },
+    { path: '/app/pose/wizard', title: '姿态估计训练', icon: Share, key: 'pose_wizard' },
+  ].filter((item) => vis[item.key as keyof typeof vis] !== false)
+})
+
+const showWizardGroup = computed(() => wizardChildren.value.length > 0)
+
+const wizardActive = computed(() =>
+  wizardChildren.value.some((item) => active.value.startsWith(item.path)),
+)
+
+const flatMenus = computed((): MenuItem[] => {
+  const vis = app.menuVisibility
+  const featureItems: MenuItem[] = [
+    { path: '/app/resources/datasets', title: '数据集管理', icon: Collection, key: 'datasets' },
+    { path: '/app/resources/models', title: '模型库', icon: Box, key: 'models' },
+    { path: '/app/resources/infer', title: '推理试用', icon: PictureFilled, key: 'infer' },
+    { path: '/app/agent/chat', title: 'AI Agent', icon: MagicStick, key: 'agent_chat' },
+    { path: '/app/agent/orchestrate', title: '流程编排', icon: List, key: 'agent_orchestrate' },
+    { path: '/app/resources/weights', title: '基础模型权重仓库', icon: Cpu, key: 'weights' },
+  ].filter((item) => vis[item.key as keyof typeof vis] !== false)
+
+  const items = [...featureItems]
+  // 系统设置：普通用户按开关；管理员始终可见，避免误关后无法再改配置
+  if (vis.settings !== false || auth.isAdmin) {
+    items.push({ path: '/app/settings', title: '系统设置', icon: Setting })
+  }
   if (auth.isAdmin) {
     items.push({ path: '/app/admin/users', title: '用户管理', icon: User })
   }
   return items
 })
 
+const homePath = computed(() => '/app/home')
+
 const pageTitle = computed(() => (route.meta.title as string) || '工作台')
+
+function toggleWizard() {
+  wizardOpen.value = !wizardOpen.value
+}
 
 onMounted(async () => {
   try {
-    await app.loadSystemInfo()
+    await app.bootstrap()
   } catch {
     // 系统信息失败不阻断布局
   }
@@ -59,7 +95,7 @@ async function onLogout() {
 <template>
   <div class="app-shell">
     <aside class="sidebar" :class="{ collapsed }">
-      <div class="brand" @click="router.push('/app/detect/wizard')">
+      <div class="brand" @click="router.push(homePath)">
         <div class="logo" aria-hidden="true">
           <span />
         </div>
@@ -69,12 +105,42 @@ async function onLogout() {
       </div>
 
       <nav class="nav">
+        <!-- 三个训练向导：折叠组 -->
+        <div v-if="showWizardGroup" class="nav-group" :class="{ open: wizardOpen }">
+          <button
+            type="button"
+            class="nav-item nav-group-head"
+            :class="{ active: wizardActive && !wizardOpen }"
+            :title="collapsed ? '训练向导' : undefined"
+            @click="toggleWizard"
+          >
+            <el-icon :size="18"><VideoCamera /></el-icon>
+            <span v-show="!collapsed" class="nav-group-title">训练向导</span>
+            <el-icon v-show="!collapsed" class="nav-caret" :size="14"><ArrowDown /></el-icon>
+          </button>
+          <div v-show="wizardOpen" class="nav-group-body">
+            <button
+              v-for="item in wizardChildren"
+              :key="item.path"
+              type="button"
+              class="nav-item nav-sub"
+              :class="{ active: active.startsWith(item.path) }"
+              :title="collapsed ? item.title : undefined"
+              @click="router.push(item.path)"
+            >
+              <el-icon :size="17"><component :is="item.icon" /></el-icon>
+              <span v-show="!collapsed">{{ item.title }}</span>
+            </button>
+          </div>
+        </div>
+
         <button
-          v-for="item in menus"
+          v-for="item in flatMenus"
           :key="item.path"
           type="button"
           class="nav-item"
           :class="{ active: active.startsWith(item.path) }"
+          :title="collapsed ? item.title : undefined"
           @click="router.push(item.path)"
         >
           <el-icon :size="18"><component :is="item.icon" /></el-icon>
@@ -105,7 +171,7 @@ async function onLogout() {
       </header>
       <main class="content fade-up">
         <RouterView v-slot="{ Component, route: r }">
-          <KeepAlive :include="['DetectWizard', 'SegmentWizard']" :max="12">
+          <KeepAlive :include="['DetectWizard', 'SegmentWizard', 'PoseWizard', 'AgentOrchestrate', 'AgentChat']" :max="12">
             <component :is="Component" :key="String(r.name || r.path)" />
           </KeepAlive>
         </RouterView>
@@ -187,6 +253,16 @@ async function onLogout() {
   grid-auto-rows: max-content;
 }
 
+.nav-group {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.nav-group-body {
+  display: grid;
+  gap: 0.15rem;
+}
+
 .nav-item,
 .nav-disabled {
   display: flex;
@@ -203,6 +279,32 @@ async function onLogout() {
   cursor: pointer;
   transition: background 0.2s ease;
   box-sizing: border-box;
+}
+
+.nav-group-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.nav-caret {
+  margin-left: auto;
+  opacity: 0.7;
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.nav-group.open .nav-caret {
+  transform: rotate(180deg);
+}
+
+.nav-sub {
+  padding-left: 1.15rem;
+  font-size: 0.88rem;
+  opacity: 0.92;
+}
+
+.sidebar.collapsed .nav-sub {
+  padding-left: 0.8rem;
 }
 
 .nav-item:hover {
@@ -308,10 +410,28 @@ async function onLogout() {
   .nav {
     display: flex;
     flex: 1;
+    align-items: center;
+  }
+
+  .nav-group {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    flex-shrink: 0;
+  }
+
+  .nav-group-body {
+    display: flex;
+    padding: 0;
+  }
+
+  .nav-sub {
+    padding-left: 0.8rem;
   }
 
   .sidebar-foot,
-  .nav-disabled {
+  .nav-disabled,
+  .nav-caret {
     display: none;
   }
 }

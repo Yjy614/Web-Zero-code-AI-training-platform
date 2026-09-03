@@ -57,17 +57,19 @@ def ensure_dataset_dirs(
     (root / "removed" / "labels").mkdir(parents=True, exist_ok=True)
     meta_path = root / "meta.json"
     if not meta_path.exists():
-        write_meta(
-            root,
-            {
-                "name": name,
-                "task_type": tt,
-                "owner_id": owner_id,
-                "owner_username": owner_storage_key(username),
-                "classes": [],
-                "excluded": [],
-            },
-        )
+        meta: dict = {
+            "name": name,
+            "task_type": tt,
+            "owner_id": owner_id,
+            "owner_username": owner_storage_key(username),
+            "classes": [],
+            "excluded": [],
+        }
+        if tt == "pose":
+            from app.services.pose_skeleton import coco17_config
+
+            meta["pose"] = coco17_config()
+        write_meta(root, meta)
     return root
 
 

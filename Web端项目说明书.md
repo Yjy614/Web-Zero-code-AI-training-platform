@@ -18,7 +18,10 @@
 | 产物版本隔离 | `runs/exports/reports/models/<tt>/<user>/<task>/<run_key>/` |
 | 模型库 | PT/ONNX 下载；无 ONNX 可转格式；删除清理对应版本产物 |
 | 推理试用 | 模型库选模型 → 上传图片 → 服务端推理并返回可视化图 |
-| AI 预标注 | 短训临时权重后补全未标注图 |
+| AI 预标注 | 短训临时权重后补全未标注图（检测） |
+| SAM2 辅助标注 | 分割标注步「点选 / SAM」切换；权重 `pretrained/sam/sam2_b.pt` |
+| AI 流程编排 | 自然语言生成计划 → 逐步确认执行（标注门禁：人工/预标注+抽检） |
+| 姿态估计 | YOLO-Pose 向导；COCO-17 / 自定义关键点；权重目录 `pretrained/pose/` |
 
 仍不做：OCR、公网自动下权重、SaaS、Windows 推理 EXE、真实集群调度（仅预留接口）。
 

@@ -28,7 +28,7 @@ async function onSubmit() {
   try {
     await auth.login(form.username, form.password)
     ElMessage.success('登录成功')
-    router.push('/app/detect/wizard')
+    router.push('/app/home')
   } catch {
     // 错误已由拦截器提示
   } finally {

@@ -18,6 +18,16 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        configure: (proxy) => {
+          // SSE 流式响应勿缓冲
+          proxy.on('proxyRes', (proxyRes) => {
+            const ct = String(proxyRes.headers['content-type'] || '')
+            if (ct.includes('text/event-stream')) {
+              proxyRes.headers['cache-control'] = 'no-cache'
+              proxyRes.headers['x-accel-buffering'] = 'no'
+            }
+          })
+        },
       },
     },
   },

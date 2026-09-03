@@ -1,5 +1,5 @@
-/** 向导步骤定义：按任务类型扩展，检测/分割共用壳。 */
-export type WizardTaskType = 'detect' | 'segment'
+/** 向导步骤定义：按任务类型扩展，检测/分割/姿态共用壳。 */
+export type WizardTaskType = 'detect' | 'segment' | 'pose'
 
 export interface WizardStepMeta {
   title: string
@@ -7,7 +7,8 @@ export interface WizardStepMeta {
 }
 
 export function getWizardSteps(taskType: WizardTaskType = 'detect'): WizardStepMeta[] {
-  const annotateDesc = taskType === 'segment' ? '多边形与类别' : '矩形框与类别'
+  const annotateDesc =
+    taskType === 'segment' ? '多边形与类别' : taskType === 'pose' ? '框、关键点与类别' : '矩形框与类别'
   return [
     { title: '导入', desc: '创建任务与上传图片' },
     { title: '清洗', desc: '去重与归一化' },

@@ -22,20 +22,27 @@ def ensure_storage_dirs() -> None:
     for rel in (
         "datasets/detect",
         "datasets/segment",
+        "datasets/pose",
         "runs/detect",
         "runs/segment",
+        "runs/pose",
         "exports/detect",
         "exports/segment",
+        "exports/pose",
         "reports/detect",
         "reports/segment",
+        "reports/pose",
         "models/detect",
         "models/segment",
+        "models/pose",
     ):
         (root / rel).mkdir(parents=True, exist_ok=True)
 
     pre = pretrained_root_path()
     for tt in WEIGHT_TASK_TYPES:
         (pre / tt).mkdir(parents=True, exist_ok=True)
+    # SAM2 辅助标注权重（与 detect/segment 训练权重隔离）
+    (pre / "sam").mkdir(parents=True, exist_ok=True)
 
     # 纠正：误放在 pretrained/<tt>/<用户>/ 下的训练产物迁回 storage/models
     _recover_misplaced_trained_models()
@@ -109,7 +116,9 @@ def _migrate_owner_dirs_on_disk(db: Session) -> None:
     """将 datasets/runs/exports/reports 下的 user_<id> 目录重命名为用户名。"""
     root = storage_root_path()
     kinds = ("datasets", "runs", "exports", "reports")
-    task_types = ("detect", "segment")
+    from app.core.task_types import TASK_TYPES
+
+    task_types = TASK_TYPES
     for user in db.query(User).all():
         old_key = f"user_{user.id}"
         try:

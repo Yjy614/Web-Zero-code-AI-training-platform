@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.schemas.dataset import BBox
+from app.schemas.dataset import BBox, Point2D, PolygonInstance
 from app.services import dataset_annotate, dataset_storage
 from app.services.task_storage import list_weight_files, normalize_weight_task_type
 from app.services.weight_resolve import resolve_pretrained_weight
@@ -23,14 +23,23 @@ PRELABEL_CONF = 0.35
 META_KEY = "prelabel_last"
 
 
-def analyze_prelabel(root: Path) -> dict[str, Any]:
+def _image_is_labeled(root: Path, name: str, task_type: str) -> bool:
+    """按任务类型判断是否已有标注。"""
+    tt = (task_type or "detect").strip().lower()
+    if tt == "segment":
+        return bool(dataset_annotate.read_polygons(root, name))
+    if tt == "pose":
+        return bool(dataset_annotate.read_poses(root, name))
+    return bool(dataset_annotate.read_annotations(root, name))
+
+def analyze_prelabel(root: Path, task_type: str = "detect") -> dict[str, Any]:
     """统计可预标注的已标注 / 未标注活跃图。"""
+    tt = normalize_weight_task_type(task_type) if task_type else "detect"
     dataset_storage.migrate_physical_removed_to_excluded(root)
     labeled: list[str] = []
     unlabeled: list[str] = []
     for name in dataset_storage.list_images(root, include_removed=False):
-        boxes = dataset_annotate.read_annotations(root, name)
-        if boxes:
+        if _image_is_labeled(root, name, tt):
             labeled.append(name)
         else:
             unlabeled.append(name)
@@ -50,6 +59,7 @@ def analyze_prelabel(root: Path) -> dict[str, Any]:
         "min_labeled": MIN_LABELED,
         "min_unlabeled": MIN_UNLABELED,
         "last_written": list(last.get("written") or []),
+        "task_type": tt,
     }
 
 
@@ -67,7 +77,31 @@ def prelabel_block_reason(info: dict[str, Any]) -> str | None:
 def resolve_prelabel_weight(task_type: str = "detect") -> Path:
     """选取预标注起点权重：优先 nano，否则仓库内任意 .pt。"""
     tt = normalize_weight_task_type(task_type)
-    preferred = ("yolov8n.pt", "yolo11n.pt", "yolov8s.pt", "yolo11s.pt")
+    if tt == "pose":
+        preferred = ("yolo11n-pose.pt", "yolov8n-pose.pt", "yolo11s-pose.pt", "yolov8s-pose.pt")
+        for name in preferred:
+            try:
+                return resolve_pretrained_weight(name, tt)
+            except FileNotFoundError:
+                continue
+        files = list_weight_files(tt)
+        for item in files:
+            name = str(item.get("name") or "")
+            if name.lower().endswith(".pt"):
+                return resolve_pretrained_weight(name, tt)
+        raise FileNotFoundError("未找到姿态预训练权重，请上传 *-pose.pt 到 pretrained/pose/")
+    if tt == "segment":
+        preferred = (
+            "yolov8n-seg.pt",
+            "yolo11n-seg.pt",
+            "yolov8s-seg.pt",
+            "yolo11s-seg.pt",
+            "yolov8m-seg.pt",
+        )
+        miss_msg = "权重仓库中没有可用的分割 .pt，请管理员先上传基础权重（如 yolov8n-seg.pt）"
+    else:
+        preferred = ("yolov8n.pt", "yolo11n.pt", "yolov8s.pt", "yolo11s.pt")
+        miss_msg = "权重仓库中没有可用的检测 .pt，请管理员先上传基础权重（如 yolov8n.pt）"
     for name in preferred:
         try:
             return resolve_pretrained_weight(name, tt)
@@ -81,7 +115,7 @@ def resolve_prelabel_weight(task_type: str = "detect") -> Path:
                 return resolve_pretrained_weight(name, tt)
             except FileNotFoundError:
                 continue
-    raise FileNotFoundError("权重仓库中没有可用的检测 .pt，请管理员先上传基础权重（如 yolov8n.pt）")
+    raise FileNotFoundError(miss_msg)
 
 
 def _tmp_dir(root: Path) -> Path:
@@ -203,6 +237,60 @@ def _predict_boxes(model: Any, image_path: Path, class_count: int) -> tuple[list
     return boxes, skipped
 
 
+def _predict_polygons(
+    model: Any, image_path: Path, class_count: int
+) -> tuple[list[PolygonInstance], int]:
+    """分割推理一张图，返回 (多边形列表, 低置信跳过数)。"""
+    results = model.predict(
+        source=str(image_path),
+        conf=PRELABEL_CONF,
+        verbose=False,
+        imgsz=PRELABEL_IMGSZ,
+        retina_masks=True,
+    )
+    if not results:
+        return [], 0
+    r0 = results[0]
+    skipped = 0
+    polys: list[PolygonInstance] = []
+    if r0.boxes is None or len(r0.boxes) == 0:
+        return [], 0
+    h, w = int(r0.orig_shape[0]), int(r0.orig_shape[1])
+    mask_xy = getattr(getattr(r0, "masks", None), "xy", None)
+    for i, b in enumerate(r0.boxes):
+        conf = float(b.conf[0]) if b.conf is not None else 0.0
+        if conf < PRELABEL_CONF:
+            skipped += 1
+            continue
+        cls_id = int(b.cls[0]) if b.cls is not None else 0
+        if cls_id < 0 or cls_id >= class_count:
+            skipped += 1
+            continue
+        pts_raw = None
+        if mask_xy is not None and i < len(mask_xy):
+            pts_raw = mask_xy[i]
+        if pts_raw is None or len(pts_raw) < 3:
+            skipped += 1
+            continue
+        points: list[Point2D] = []
+        for p in pts_raw:
+            points.append(
+                Point2D(
+                    x=max(0.0, min(1.0, float(p[0]) / max(w, 1))),
+                    y=max(0.0, min(1.0, float(p[1]) / max(h, 1))),
+                )
+            )
+        # 过密抽稀，避免标签过大
+        if len(points) > 80:
+            step = max(1, len(points) // 80)
+            points = points[::step]
+            if len(points) < 3:
+                skipped += 1
+                continue
+        polys.append(PolygonInstance(class_id=cls_id, points=points))
+    return polys, skipped
+
+
 def save_prelabel_meta(root: Path, written: list[str], job_id: int) -> None:
     meta = dataset_storage.read_meta(root)
     meta[META_KEY] = {
@@ -258,7 +346,7 @@ def run_prelabel_job(
     执行预标注全流程。update_progress(progress, message) 写 Job 状态。
     成功/失败/取消均清理临时目录与权重。
     """
-    info = analyze_prelabel(root)
+    info = analyze_prelabel(root, task_type)
     reason = prelabel_block_reason(info)
     if reason:
         raise ValueError(reason)
@@ -267,6 +355,7 @@ def run_prelabel_job(
     unlabeled: list[str] = info["unlabeled"]
     classes: list[str] = info["classes"]
     weight = resolve_prelabel_weight(task_type)
+    is_segment = (task_type or "detect") == "segment"
 
     update_progress(5, "准备预标注数据…")
     if is_cancelled():
@@ -334,21 +423,28 @@ def run_prelabel_job(
             if is_cancelled():
                 raise InterruptedError("预标注已取消")
             # 再次确认仍无人工标注（避免过程中被写入）
-            existing = dataset_annotate.read_annotations(root, name)
-            if existing:
+            if _image_is_labeled(root, name, task_type):
                 skipped_labeled += 1
                 continue
             img_path = root / "images" / name
             if not img_path.is_file():
                 continue
-            boxes, skipped = _predict_boxes(pred_model, img_path, len(classes))
-            low_conf_skipped += skipped
-            if boxes:
-                dataset_annotate.write_annotations(root, name, boxes)
-                written.append(name)
+            if is_segment:
+                polys, skipped = _predict_polygons(pred_model, img_path, len(classes))
+                low_conf_skipped += skipped
+                if polys:
+                    dataset_annotate.write_polygons(root, name, polys)
+                    written.append(name)
+            else:
+                boxes, skipped = _predict_boxes(pred_model, img_path, len(classes))
+                low_conf_skipped += skipped
+                if boxes:
+                    dataset_annotate.write_annotations(root, name, boxes)
+                    written.append(name)
             update_progress(100, f"推理写入 {i + 1}/{total}")
 
         save_prelabel_meta(root, written, job_id)
+        unit = "个实例" if is_segment else "个框"
         result = {
             "written": len(written),
             "written_files": written,
@@ -359,7 +455,7 @@ def run_prelabel_job(
             "message": (
                 f"预标注完成：写入 {len(written)} 张；"
                 f"跳过已有标注 {skipped_labeled} 张；"
-                f"低置信未写入 {low_conf_skipped} 个框"
+                f"低置信未写入 {low_conf_skipped} {unit}"
             ),
         }
         update_progress(100, result["message"])
@@ -376,20 +472,21 @@ def run_prelabel_mock(
     job_id: int,
     update_progress,
     is_cancelled,
+    task_type: str = "detect",
 ) -> dict[str, Any]:
-    """演示模式：不真实训练，给未标注图写一个居中占位框。"""
+    """演示模式：不真实训练，给未标注图写占位标注。"""
     import time
 
-    info = analyze_prelabel(root)
+    info = analyze_prelabel(root, task_type)
     reason = prelabel_block_reason(info)
     if reason:
         raise ValueError(reason)
     unlabeled: list[str] = info["unlabeled"]
     classes: list[str] = info["classes"]
     class_id = 0 if classes else 0
+    is_segment = (task_type or "detect") == "segment"
     written: list[str] = []
     update_progress(0, f"演示模式：模拟快速训练（{PRELABEL_EPOCHS} epochs）…")
-    # 演示用少量步进模拟 epoch 进度，百分比仍按 已训轮数/总轮数
     demo_steps = 10
     for step in range(1, demo_steps + 1):
         if is_cancelled():
@@ -398,17 +495,34 @@ def run_prelabel_mock(
         ep = max(1, int(round(step / demo_steps * PRELABEL_EPOCHS)))
         pct = round(ep / PRELABEL_EPOCHS * 100, 1)
         update_progress(min(100.0, pct), f"演示训练模拟 epoch {ep}/{PRELABEL_EPOCHS}")
-    update_progress(100, "演示模式：写入预标注框…")
+    update_progress(100, "演示模式：写入预标注…")
     for i, name in enumerate(unlabeled):
         if is_cancelled():
             raise InterruptedError("预标注已取消")
-        if dataset_annotate.read_annotations(root, name):
+        if _image_is_labeled(root, name, task_type):
             continue
-        dataset_annotate.write_annotations(
-            root,
-            name,
-            [BBox(class_id=class_id, x_center=0.5, y_center=0.5, width=0.35, height=0.35)],
-        )
+        if is_segment:
+            dataset_annotate.write_polygons(
+                root,
+                name,
+                [
+                    PolygonInstance(
+                        class_id=class_id,
+                        points=[
+                            Point2D(x=0.50, y=0.32),
+                            Point2D(x=0.68, y=0.50),
+                            Point2D(x=0.50, y=0.68),
+                            Point2D(x=0.32, y=0.50),
+                        ],
+                    )
+                ],
+            )
+        else:
+            dataset_annotate.write_annotations(
+                root,
+                name,
+                [BBox(class_id=class_id, x_center=0.5, y_center=0.5, width=0.35, height=0.35)],
+            )
         written.append(name)
         update_progress(100, f"写入 {i + 1}/{len(unlabeled)}")
     save_prelabel_meta(root, written, job_id)

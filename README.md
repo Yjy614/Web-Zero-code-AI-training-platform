@@ -56,15 +56,16 @@ npm run dev
 
 ## 主要能力
 
-- **双任务向导**（detect / segment）：导入 → 清洗 → 标注 → 配置 → 训练 → 评估 → 导出
-- **标注**：检测为 YOLO 矩形框；分割为多边形；按类别配色；删类时清理/重映射标注；AI 预标注
+- **三任务向导**（detect / segment / pose）：导入 → 清洗 → 标注 → 配置 → 训练 → 评估 → 导出
+- **标注**：检测为 YOLO 矩形框；分割为多边形（**点选 / SAM2 单击**可切换）；姿态为框 + 关键点（COCO-17 或自定义 N）；按类别配色；删类时清理/重映射标注；检测支持 AI 预标注
 - **训练**：演示模式 Mock；关闭后本机真实训练；曲线与进度轮询
 - **产物版本隔离**（同任务多次训练互不覆盖）：
   ```text
   runs|exports|reports|models / <task_type> / <user> / <task_name> / <run_key> /
   ```
 - **模型库**：按次归档（`名称`、`名称_2`…）；下载 PT / 转 ONNX；删除时同步清理该版本 runs/exports/reports
-- **推理试用**：从模型库选模型，上传图片，返回带框/掩膜的可视化结果
+- **推理试用**：从模型库选模型，上传图片，返回带框/掩膜/关键点的可视化结果
+- **AI 流程编排**：自然语言生成训练计划，逐步确认执行（标注需人工/预标注+抽检，不由一句话直接标完）
 - **资源与权限**：数据集 / 模型 / 权重仓库；管理员可上传预训练权重、管用户；角色隔离
 
 ## 当前里程碑
@@ -75,6 +76,7 @@ npm run dev
 - **M4**：用户管理、设置页（LLM/Vision）、权限隔离
 - **本机真实训练**：关闭演示模式后走 `LocalJobRunner`（Ultralytics）
 - **实例分割**：与检测对齐的完整向导与多边形标注
+- **姿态估计**：YOLO-Pose 向导；COCO-17 / 自定义关键点；`pretrained/pose/` 权重
 - **增强**：AI 预标注、模型库 PT/ONNX、训练产物版本隔离、推理试用页
 
 ## 真实训练（本机）
@@ -98,6 +100,9 @@ CPU 可跑但较慢；有 NVIDIA GPU 时设备选 `cuda:0`。
 
 - `storage_root`：用户数据（datasets / runs / exports / reports / **models**）
 - `pretrained_root`：系统预训练权重（仅管理员上传，与 storage 分离；训练起点，不是模型库归档）
+  - `pretrained/detect/`、`pretrained/segment/`、`pretrained/pose/`：YOLO 训练起点权重
+  - 姿态样例：`python scripts/import_coco8_pose.py --owner admin --with-weight`（导入 coco8_pose + yolo11n-pose.pt）
+  - `pretrained/sam/sam2_b.pt`：分割标注 SAM2 辅助权重（约 154MB，不入库，需本机准备）
 
 运行时设置（演示开关、大模型配置）会写入 `backend/config/runtime_settings.json`（已加入 `.gitignore`）。
 

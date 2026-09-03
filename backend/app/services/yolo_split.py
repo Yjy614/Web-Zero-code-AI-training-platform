@@ -106,7 +106,12 @@ def prepare_yolo_split(
         except json.JSONDecodeError:
             classes = []
 
-    yaml_text = _build_data_yaml(dataset_root, classes, has_test=len(test_list) > 0)
+    yaml_text = _build_data_yaml(
+        dataset_root,
+        classes,
+        has_test=len(test_list) > 0,
+        meta=meta,
+    )
     (dataset_root / "data.yaml").write_text(yaml_text, encoding="utf-8")
     meta["split"] = {
         "train": len(train_list),
@@ -127,7 +132,13 @@ def prepare_yolo_split(
     }
 
 
-def _build_data_yaml(dataset_root: Path, classes: list, *, has_test: bool) -> str:
+def _build_data_yaml(
+    dataset_root: Path,
+    classes: list,
+    *,
+    has_test: bool,
+    meta: dict | None = None,
+) -> str:
     names = classes if classes else ["object"]
     lines = [
         f"path: {dataset_root.as_posix()}",
@@ -140,4 +151,17 @@ def _build_data_yaml(dataset_root: Path, classes: list, *, has_test: bool) -> st
     lines.append("names:")
     for i, n in enumerate(names):
         lines.append(f"  {i}: {n}")
+
+    # 姿态：写入 kpt_shape / flip_idx 供 Ultralytics YOLO-Pose 使用
+    tt = ""
+    if isinstance(meta, dict):
+        tt = str(meta.get("task_type") or "").strip().lower()
+    if tt == "pose":
+        from app.services.pose_skeleton import pose_config_from_meta
+
+        cfg = pose_config_from_meta(meta)
+        shape = cfg.get("kpt_shape") or [17, 3]
+        flip = cfg.get("flip_idx") or list(range(int(shape[0])))
+        lines.append(f"kpt_shape: [{int(shape[0])}, {int(shape[1]) if len(shape) > 1 else 3}]")
+        lines.append("flip_idx: [" + ", ".join(str(int(x)) for x in flip) + "]")
     return "\n".join(lines) + "\n"

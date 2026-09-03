@@ -40,6 +40,22 @@ class ModelEndpointConfig(BaseModel):
     model: str = ""
     timeout: int = Field(default=60, ge=5, le=600)
     api_key_set: bool = False
+    # DeepSeek 思考模式（仅 LLM 使用；vision 忽略）
+    thinking_enabled: bool = True
+    reasoning_effort: str = Field(default="high", description="low | high | max")
+
+
+class MenuVisibility(BaseModel):
+    detect_wizard: bool = True
+    segment_wizard: bool = True
+    pose_wizard: bool = True
+    datasets: bool = True
+    models: bool = True
+    infer: bool = True
+    agent_chat: bool = True
+    agent_orchestrate: bool = True
+    weights: bool = True
+    settings: bool = True
 
 
 class SettingsOut(BaseModel):
@@ -47,6 +63,7 @@ class SettingsOut(BaseModel):
     job_runner: str
     forbid_weight_download: bool
     free_step_nav: bool
+    menu_visibility: MenuVisibility
     llm: ModelEndpointConfig
     vision: ModelEndpointConfig
 
@@ -56,23 +73,34 @@ class ModelEndpointUpdate(BaseModel):
     api_key: str | None = None
     model: str | None = None
     timeout: int | None = Field(default=None, ge=5, le=600)
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
 
 
 class SettingsUpdate(BaseModel):
     demo_mode: bool | None = None
     llm: ModelEndpointUpdate | None = None
     vision: ModelEndpointUpdate | None = None
+    menu_visibility: MenuVisibility | None = None
 
 
 def _to_settings_out() -> SettingsOut:
     data = runtime_settings.public_settings(mask_secrets=True)
+    llm = dict(data["llm"] or {})
+    vision = dict(data["vision"] or {})
+    # vision 不使用思考模式字段，给默认值避免校验失败
+    llm.setdefault("thinking_enabled", True)
+    llm.setdefault("reasoning_effort", "high")
+    vision.setdefault("thinking_enabled", False)
+    vision.setdefault("reasoning_effort", "high")
     return SettingsOut(
         demo_mode=data["demo_mode"],
         job_runner=data["job_runner"],
         forbid_weight_download=data["forbid_weight_download"],
         free_step_nav=data["free_step_nav"],
-        llm=ModelEndpointConfig(**data["llm"]),
-        vision=ModelEndpointConfig(**data["vision"]),
+        menu_visibility=MenuVisibility(**(data.get("menu_visibility") or {})),
+        llm=ModelEndpointConfig(**llm),
+        vision=ModelEndpointConfig(**vision),
     )
 
 
@@ -130,5 +158,7 @@ def put_app_settings(body: SettingsUpdate, _: User = Depends(require_admin)) -> 
         patch["llm"] = body.llm.model_dump(exclude_none=True)
     if body.vision is not None:
         patch["vision"] = body.vision.model_dump(exclude_none=True)
+    if body.menu_visibility is not None:
+        patch["menu_visibility"] = body.menu_visibility.model_dump()
     runtime_settings.update_runtime_settings(patch)
     return _to_settings_out()

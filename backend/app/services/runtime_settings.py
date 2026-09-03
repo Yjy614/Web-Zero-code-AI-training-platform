@@ -15,6 +15,23 @@ _DEFAULT_LLM = {
     "api_key": "",
     "model": "",
     "timeout": 60,
+    # DeepSeek 思考模式：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+    "thinking_enabled": True,
+    "reasoning_effort": "high",
+}
+
+_DEFAULT_MENU_VISIBILITY = {
+    "detect_wizard": True,
+    "segment_wizard": True,
+    "pose_wizard": True,
+    "datasets": True,
+    "models": True,
+    "infer": True,
+    "agent_chat": True,
+    "agent_orchestrate": True,
+    "weights": True,
+    "settings": True,
+    # 用户管理不在此列：仅管理员可见
 }
 
 _DEFAULT_VISION = {
@@ -44,11 +61,15 @@ def get_runtime_settings() -> dict[str, Any]:
     """合并 YAML 默认值与运行时覆盖。"""
     base = get_settings()
     raw = _read_file()
+    menu_vis = {**_DEFAULT_MENU_VISIBILITY, **(raw.get("menu_visibility") or {})}
+    # 只保留已知键，且强制为 bool
+    menu_visibility = {k: bool(menu_vis.get(k, True)) for k in _DEFAULT_MENU_VISIBILITY}
     return {
         "demo_mode": raw.get("demo_mode", base.demo_mode),
         "job_runner": base.job_runner,
         "forbid_weight_download": base.forbid_weight_download,
         "free_step_nav": base.free_step_nav,
+        "menu_visibility": menu_visibility,
         "llm": {**_DEFAULT_LLM, **(raw.get("llm") or {})},
         "vision": {**_DEFAULT_VISION, **(raw.get("vision") or {})},
     }
@@ -59,6 +80,13 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
     raw = _read_file()
     if "demo_mode" in patch and patch["demo_mode"] is not None:
         raw["demo_mode"] = bool(patch["demo_mode"])
+    if "menu_visibility" in patch and isinstance(patch["menu_visibility"], dict):
+        cur = {**_DEFAULT_MENU_VISIBILITY, **(raw.get("menu_visibility") or {})}
+        for k, v in patch["menu_visibility"].items():
+            if k not in _DEFAULT_MENU_VISIBILITY or v is None:
+                continue
+            cur[k] = bool(v)
+        raw["menu_visibility"] = {k: bool(cur.get(k, True)) for k in _DEFAULT_MENU_VISIBILITY}
     if "llm" in patch and isinstance(patch["llm"], dict):
         cur = {**_DEFAULT_LLM, **(raw.get("llm") or {})}
         for k, v in patch["llm"].items():
@@ -66,6 +94,13 @@ def update_runtime_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 continue
             # 若前端传回掩码密钥则不覆盖原文
             if k == "api_key" and isinstance(v, str) and v.startswith("••••"):
+                continue
+            if k == "reasoning_effort":
+                effort = str(v).strip().lower()
+                cur[k] = effort if effort in {"low", "high", "max"} else "high"
+                continue
+            if k == "thinking_enabled":
+                cur[k] = bool(v)
                 continue
             cur[k] = v
         raw["llm"] = cur

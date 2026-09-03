@@ -131,6 +131,29 @@ def run_predict(
                     polygons[i] = pts if len(pts) >= 3 else None
                 except Exception:  # noqa: BLE001
                     polygons[i] = None
+        # 姿态关键点（像素坐标 xy + 可见性）
+        kpts_list: list[list[list[float]] | None] = [None] * len(xyxy)
+        if getattr(r0, "keypoints", None) is not None:
+            try:
+                kxy = r0.keypoints.xy.cpu().tolist()
+                kconf = None
+                if getattr(r0.keypoints, "conf", None) is not None:
+                    kconf = r0.keypoints.conf.cpu().tolist()
+                for i, pts in enumerate(kxy):
+                    if i >= len(kpts_list):
+                        break
+                    row: list[list[float]] = []
+                    for j, p in enumerate(pts):
+                        x, y = float(p[0]), float(p[1])
+                        v = 2.0
+                        if kconf is not None and i < len(kconf) and j < len(kconf[i]):
+                            c = float(kconf[i][j])
+                            v = 2.0 if c >= 0.5 else (1.0 if c > 0.01 else 0.0)
+                        row.append([round(x, 2), round(y, 2), v])
+                    kpts_list[i] = row
+            except Exception:  # noqa: BLE001
+                pass
+
         for i, box in enumerate(xyxy):
             cid = int(clss[i])
             cname = str(names.get(cid, names.get(str(cid), f"class_{cid}")))
@@ -142,6 +165,8 @@ def run_predict(
             }
             if polygons[i]:
                 item["polygon"] = polygons[i]
+            if kpts_list[i]:
+                item["keypoints"] = kpts_list[i]
             detections.append(item)
 
     # Ultralytics plot 输出 BGR ndarray

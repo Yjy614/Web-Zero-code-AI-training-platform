@@ -37,10 +37,12 @@ const router = useRouter()
 const taskType: WizardTaskType =
   route.meta.taskType === 'segment' || String(route.name || '').includes('segment')
     ? 'segment'
-    : 'detect'
+    : route.meta.taskType === 'pose' || String(route.name || '').includes('pose')
+      ? 'pose'
+      : 'detect'
 const steps = computed(() => getWizardSteps(taskType))
 const wizardTitle = computed(() =>
-  taskType === 'segment' ? '实例分割训练' : '目标检测训练',
+  taskType === 'segment' ? '实例分割训练' : taskType === 'pose' ? '姿态估计训练' : '目标检测训练',
 )
 const WIZARD_STATE_KEY = wizardStateKey(taskType)
 
@@ -266,9 +268,14 @@ async function hydrateWizard() {
   let targetStep = 0
 
   if (qid) {
-    // 从数据集管理带入：仅用 datasetId 作一次性入口，步骤不读 URL
+    // 外部带入 datasetId；若带 step 则跳到指定步骤（如编排页「去标注」→ step=2）
     targetDataset = qid
-    targetStep = saved?.datasetId === qid ? saved.step ?? 0 : 0
+    const qStep = Number(route.query.step)
+    if (Number.isFinite(qStep) && qStep >= 0) {
+      targetStep = qStep
+    } else {
+      targetStep = saved?.datasetId === qid ? saved.step ?? 0 : 0
+    }
   } else if (saved?.datasetId) {
     // 同一次登录内从其他菜单返回：恢复会话进度（登出后会清空）
     targetDataset = saved.datasetId
@@ -474,14 +481,22 @@ onActivated(async () => {
   }
 
   const qid = Number(route.query.datasetId)
-  if (qid && qid !== currentId.value) {
+  const qStepRaw = route.query.step
+  const qStep =
+    qStepRaw != null && String(qStepRaw) !== '' ? Number(qStepRaw) : Number.NaN
+  if (qid && datasets.value.some((d) => d.id === qid)) {
     loading.value = true
     try {
-      // 确认列表中仍存在该数据集
-      if (datasets.value.some((d) => d.id === qid)) {
-        active.value = 0
+      if (qid !== currentId.value) {
         await selectDataset(qid)
+      } else {
+        await refreshCurrent()
+        await refreshImages()
+      }
+      if (Number.isFinite(qStep) && qStep >= 0) {
+        active.value = clampReachableStep(qStep)
         if (active.value === 1) await prepareCleanStep()
+        persistWizardState()
       }
     } finally {
       loading.value = false

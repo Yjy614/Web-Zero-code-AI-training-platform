@@ -3,6 +3,7 @@
  * 推理试用：从模型库选模型，上传图片，服务端推理并展示可视化结果。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Picture, VideoPlay } from '@element-plus/icons-vue'
 import {
@@ -11,11 +12,15 @@ import {
   type ModelItem,
   type PredictResult,
 } from '@/api/tasks'
+import { taskTypeLabel } from '@/utils/taskType'
+
+const route = useRoute()
 
 const TASK_FILTERS = [
   { value: 'all', label: '全部类型' },
   { value: 'detect', label: '目标检测' },
   { value: 'segment', label: '实例分割' },
+  { value: 'pose', label: '姿态估计' },
 ]
 
 const loadingModels = ref(false)
@@ -27,6 +32,12 @@ const conf = ref(0.25)
 const iou = ref(0.45)
 const imgsz = ref(640)
 
+function applyTypeFromQuery() {
+  const t = String(route.query.type || '').trim().toLowerCase()
+  if (t === 'detect' || t === 'segment' || t === 'pose' || t === 'all') {
+    filterType.value = t
+  }
+}
 const file = ref<File | null>(null)
 const previewUrl = ref('')
 const result = ref<PredictResult | null>(null)
@@ -123,7 +134,10 @@ watch(filterType, () => {
   void loadModels()
 })
 
-onMounted(loadModels)
+onMounted(() => {
+  applyTypeFromQuery()
+  void loadModels()
+})
 
 onUnmounted(() => {
   revokePreview()
@@ -171,7 +185,7 @@ onUnmounted(() => {
             <el-option
               v-for="m in usableModels"
               :key="m.id"
-              :label="`${displayName(m.name)} · ${m.task_type || 'detect'}`"
+              :label="`${displayName(m.name)} · ${taskTypeLabel(m.task_type)}`"
               :value="m.id"
             />
           </el-select>
@@ -266,6 +280,11 @@ onUnmounted(() => {
             </el-table-column>
             <el-table-column label="掩膜" width="72">
               <template #default="{ row }">{{ row.polygon?.length ? '有' : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="关键点" width="80">
+              <template #default="{ row }">
+                {{ row.keypoints?.length ? `${row.keypoints.length} 点` : '—' }}
+              </template>
             </el-table-column>
           </el-table>
         </div>
