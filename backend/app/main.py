@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import agent, auth, datasets, resources, settings, tasks, users
+from app.api import active_learn, agent, auth, datasets, resources, settings, tasks, users
 from app.core.database import SessionLocal, init_db
 from app.services.bootstrap import (
     ensure_storage_dirs,
@@ -97,6 +97,7 @@ app.include_router(datasets.router, prefix="/api/v1")
 app.include_router(tasks.router, prefix="/api/v1")
 app.include_router(resources.router, prefix="/api/v1")
 app.include_router(agent.router, prefix="/api/v1")
+app.include_router(active_learn.router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")

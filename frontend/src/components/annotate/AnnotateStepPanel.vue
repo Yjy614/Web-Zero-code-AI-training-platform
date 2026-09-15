@@ -36,6 +36,12 @@ const props = defineProps<{
   taskType?: WizardTaskType
   /** 嵌入侧栏/抽屉时隐藏向导「下一步/返回清洗」与顶部说明 */
   embedded?: boolean
+  /** 仅展示这些文件名（如主动学习难例/简单例），顺序与传入一致 */
+  onlyNames?: string[]
+  /** 隐藏 AI 预标注（主动学习复核场景） */
+  hidePrelabel?: boolean
+  /** 嵌入模式下返回按钮文案 */
+  backLabel?: string
 }>()
 
 const emit = defineEmits<{
@@ -46,8 +52,8 @@ const emit = defineEmits<{
 const isSegment = computed(() => props.taskType === 'segment')
 const isPose = computed(() => props.taskType === 'pose')
 const isDetect = computed(() => !isSegment.value && !isPose.value)
-/** 一期姿态不做预标注 */
-const showPrelabel = computed(() => !isPose.value)
+/** 一期姿态不做预标注；主动学习复核也不展示预标注 */
+const showPrelabel = computed(() => !isPose.value && !props.hidePrelabel)
 
 /** 分割标注模式：点选连点 / SAM2 单击 */
 const segMode = ref<'point' | 'sam'>('point')
@@ -78,7 +84,12 @@ const prelabelMessage = ref('')
 const prelabelJobId = ref<number | null>(null)
 let prelabelPollTimer: number | null = null
 
-const activeImages = computed(() => images.value.filter((i) => i.status === 'active'))
+const activeImages = computed(() => {
+  const all = images.value.filter((i) => i.status === 'active')
+  if (!props.onlyNames?.length) return all
+  const byName = new Map(all.map((i) => [i.name, i]))
+  return props.onlyNames.map((n) => byName.get(n)).filter((x): x is ImageItem => Boolean(x))
+})
 const currentImage = computed(() => activeImages.value[imageIndex.value] || null)
 const canPrelabel = computed(
   () => Boolean(prelabelInfo.value?.can_prelabel) && !prelabelRunning.value,
@@ -560,6 +571,14 @@ watch(
   },
 )
 
+watch(
+  () => (props.onlyNames || []).join('\0'),
+  async () => {
+    imageIndex.value = 0
+    await loadCurrentAnnotation()
+  },
+)
+
 onMounted(() => {
   void bootstrap()
 })
@@ -723,6 +742,11 @@ defineExpose({ flushSave })
                 下一步：配置
               </el-button>
               <el-button :disabled="prelabelRunning || samBusy" @click="emit('back')">返回清洗</el-button>
+            </template>
+            <template v-else>
+              <el-button type="primary" :disabled="prelabelRunning || samBusy" @click="emit('back')">
+                {{ backLabel || '完成并返回' }}
+              </el-button>
             </template>
           </div>
         </div>

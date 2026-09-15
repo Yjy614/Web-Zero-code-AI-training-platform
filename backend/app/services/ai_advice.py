@@ -104,7 +104,6 @@ SYSTEM_PROMPT = """你是工业场景目标检测（YOLO）训练顾问。用户
   示例：⭐⭐⭐ 1. 图片仅 5 张，建议补充至数百张并覆盖光照变化。
 - 用 ⭐ 数量表示优先级：⭐⭐⭐ 最高，⭐⭐ 中，⭐ 较低；每条 1～3 颗星；
 - 每条说明原因与建议操作；不要编造未提供的指标；
-- 演示模式指标可能是假数据，可简要提醒；
 - 总长度控制在 400 字以内；不要建议下载公网权重或改服务器代码。"""
 
 
@@ -197,9 +196,6 @@ def _fallback_advice(ctx: dict[str, Any]) -> str:
             data_tips.append(("⭐⭐", "精确率偏低：可能误检，检查负样本/背景干扰，或收紧标注一致性。"))
     except (TypeError, ValueError):
         pass
-
-    if ctx.get("demo_mode"):
-        param_tips.append(("⭐", "当前为演示模式，指标可能为 Mock；真实优化请关闭演示模式并使用实际训练结果。"))
 
     if not data_tips and not param_tips:
         data_tips.append(("⭐", "指标与数据规模尚可。可从难例挖掘、标注一致性抽检做小步迭代。"))

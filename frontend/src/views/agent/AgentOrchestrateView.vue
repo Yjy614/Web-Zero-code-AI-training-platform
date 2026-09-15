@@ -364,7 +364,7 @@ function startJobPoll(jobId: number) {
     } catch {
       // 下次再试
     }
-  }, 1200)
+  }, 400)
 }
 
 async function onRun(action: 'run' | 'skip' = 'run') {

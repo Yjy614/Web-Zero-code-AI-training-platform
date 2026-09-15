@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,14 @@ def get_owned_task(db: Session, user: User, task_id: int) -> TrainTask:
     return task
 
 
+def _is_agent_task_name(name: str | None) -> bool:
+    """是否为 AI Agent 侧任务名（含 _agent）；向导任务一般为 *_train。"""
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    return bool(re.search(r"(^|_)agent(_|$)", n))
+
+
 def ensure_train_task(
     db: Session,
     user: User,
@@ -69,7 +78,7 @@ def ensure_train_task(
     task_name: str | None = None,
     task_id: int | None = None,
 ) -> dict[str, Any]:
-    """确保有一个绑定到数据集的训练任务。"""
+    """确保有一个绑定到数据集的训练任务（Agent 专用命名 *_agent）。"""
     if task_id is not None:
         task = get_owned_task(db, user, task_id)
         ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
@@ -90,30 +99,51 @@ def ensure_train_task(
         dataset_name=dataset_name,
         task_type=task_type,
     )
-    name = (task_name or f"{ds.name}_agent").strip() or f"{ds.name}_agent"
+    requested = (task_name or "").strip()
+    reuse_statuses = {"draft", "configured", "trained", "evaluated", "exported"}
+    candidates = (
+        db.query(TrainTask)
+        .filter(TrainTask.owner_id == user.id, TrainTask.dataset_id == ds.id)
+        .order_by(TrainTask.id.desc())
+        .all()
+    )
+    # 未指定名称：复用同数据集 Agent 任务
+    if not requested:
+        existing = next(
+            (t for t in candidates if t.status in reuse_statuses and _is_agent_task_name(t.name)),
+            None,
+        )
+        if existing:
+            return {
+                "task_id": existing.id,
+                "task_name": existing.name,
+                "dataset_id": ds.id,
+                "dataset_name": ds.name,
+                "task_type": ds.task_type,
+                "status": existing.status,
+                "reused": True,
+            }
+        name = f"{ds.name}_agent"
+    else:
+        # 显式任务名（如主动学习 *_al_*）：只复用同名，绝不改写 Agent/向导任务
+        existing = next((t for t in candidates if t.name == requested), None)
+        if existing:
+            return {
+                "task_id": existing.id,
+                "task_name": existing.name,
+                "dataset_id": ds.id,
+                "dataset_name": ds.name,
+                "task_type": ds.task_type,
+                "status": existing.status,
+                "reused": True,
+            }
+        name = requested
+
     base = name
     n = 1
     while db.query(TrainTask).filter(TrainTask.owner_id == user.id, TrainTask.name == name).first():
         n += 1
         name = f"{base}_{n}"
-
-    # 尽量复用同数据集、同名前缀的最近草稿任务，避免每次新建
-    existing = (
-        db.query(TrainTask)
-        .filter(TrainTask.owner_id == user.id, TrainTask.dataset_id == ds.id)
-        .order_by(TrainTask.id.desc())
-        .first()
-    )
-    if existing and existing.status in {"draft", "configured", "trained", "evaluated", "exported"}:
-        return {
-            "task_id": existing.id,
-            "task_name": existing.name,
-            "dataset_id": ds.id,
-            "dataset_name": ds.name,
-            "task_type": ds.task_type,
-            "status": existing.status,
-            "reused": True,
-        }
 
     task = TrainTask(
         name=name,
@@ -183,7 +213,7 @@ def set_train_config(
     raw["pretrained_weight"] = weight
 
     try:
-        resolve_pretrained_weight(weight, tt)
+        resolve_pretrained_weight(weight, tt, db=db)
     except FileNotFoundError as e:
         raise ValueError(str(e)) from e
 
@@ -253,7 +283,7 @@ async def start_train(db: Session, user: User, *, task_id: int) -> dict[str, Any
 
     if not is_demo_mode():
         try:
-            resolve_pretrained_weight(cfg.pretrained_weight, ds.task_type or "detect")
+            resolve_pretrained_weight(cfg.pretrained_weight, ds.task_type or "detect", db=db)
         except FileNotFoundError as e:
             raise ValueError(str(e)) from e
         try:

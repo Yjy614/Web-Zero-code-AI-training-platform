@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_admin
 from app.core.database import get_db
+from app.models.dataset import Dataset
 from app.models.train import Job, ModelRecord, TrainTask
 from app.models.user import User
 from app.runners.mock_runner import get_runner
 from app.schemas.task import JobOut, ModelOut, PredictOut, WeightItem
 from app.services import model_artifacts, model_infer, task_storage
+from app.services.model_lineage import parent_weight_label
 
 router = APIRouter(tags=["资源"])
 
@@ -54,6 +56,19 @@ def _model_out(db: Session, r: ModelRecord) -> ModelOut:
         metrics = json.loads(r.metrics_json or "{}")
     except json.JSONDecodeError:
         metrics = {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    lineage = metrics.get("lineage") if isinstance(metrics.get("lineage"), dict) else {}
+    dataset_id = lineage.get("dataset_id")
+    dataset_name = lineage.get("dataset_name")
+    # 无 lineage 时回退任务关联
+    if dataset_id is None and r.task_id:
+        task = db.query(TrainTask).filter(TrainTask.id == r.task_id).first()
+        if task and task.dataset_id:
+            dataset_id = task.dataset_id
+            ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
+            dataset_name = ds.name if ds else None
+    parent_id, parent_weight, parent_label = parent_weight_label(db, lineage)
     return ModelOut(
         id=r.id,
         name=r.name,
@@ -61,10 +76,15 @@ def _model_out(db: Session, r: ModelRecord) -> ModelOut:
         task_type=r.task_type,
         owner_id=r.owner_id,
         task_id=r.task_id,
-        metrics=metrics if isinstance(metrics, dict) else {},
+        metrics=metrics,
         created_at=r.created_at,
         has_pt=model_artifacts.find_pt_path(r) is not None,
         has_onnx=model_artifacts.find_onnx_path(db, r) is not None,
+        dataset_id=int(dataset_id) if dataset_id is not None else None,
+        dataset_name=str(dataset_name) if dataset_name else None,
+        parent_model_id=parent_id,
+        parent_weight=parent_weight,
+        parent_weight_label=parent_label,
     )
 
 
@@ -159,7 +179,19 @@ def list_models(
         tt = _parse_task_type(task_type)
         q = q.filter(ModelRecord.task_type == tt)
     rows = q.order_by(ModelRecord.id.desc()).all()
-    return [_model_out(db, r) for r in rows]
+    # 仅展示训练成功且仍有非空 PT 的记录；未开训或中途取消不应出现
+    out: list[ModelOut] = []
+    for r in rows:
+        pt = model_artifacts.find_pt_path(r)
+        if pt is None:
+            continue
+        try:
+            if pt.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        out.append(_model_out(db, r))
+    return out
 
 
 @router.get("/models/{model_id}/download")

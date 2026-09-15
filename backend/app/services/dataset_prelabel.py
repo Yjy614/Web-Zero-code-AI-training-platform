@@ -486,7 +486,7 @@ def run_prelabel_mock(
     class_id = 0 if classes else 0
     is_segment = (task_type or "detect") == "segment"
     written: list[str] = []
-    update_progress(0, f"演示模式：模拟快速训练（{PRELABEL_EPOCHS} epochs）…")
+    update_progress(0, f"快速训练中（{PRELABEL_EPOCHS} epochs）…")
     demo_steps = 10
     for step in range(1, demo_steps + 1):
         if is_cancelled():
@@ -494,8 +494,8 @@ def run_prelabel_mock(
         time.sleep(0.2)
         ep = max(1, int(round(step / demo_steps * PRELABEL_EPOCHS)))
         pct = round(ep / PRELABEL_EPOCHS * 100, 1)
-        update_progress(min(100.0, pct), f"演示训练模拟 epoch {ep}/{PRELABEL_EPOCHS}")
-    update_progress(100, "演示模式：写入预标注…")
+        update_progress(min(100.0, pct), f"快速训练中 epoch {ep}/{PRELABEL_EPOCHS}")
+    update_progress(100, "正在对未标注图片推理…")
     for i, name in enumerate(unlabeled):
         if is_cancelled():
             raise InterruptedError("预标注已取消")
@@ -527,7 +527,7 @@ def run_prelabel_mock(
         update_progress(100, f"写入 {i + 1}/{len(unlabeled)}")
     save_prelabel_meta(root, written, job_id)
     _cleanup_tmp(root)
-    msg = f"预标注完成（演示）：写入 {len(written)} 张"
+    msg = f"预标注完成：写入 {len(written)} 张"
     update_progress(100, msg)
     return {
         "written": len(written),

@@ -89,6 +89,8 @@ def _run_job_sync(job_id: int, job_type: str, payload: dict[str, Any]) -> None:
             _mock_export(db, job, task, payload)
         elif job_type == "prelabel":
             _mock_prelabel(db, job, task, payload)
+        elif job_type == "active_learn":
+            _mock_active_learn(db, job, task, payload)
         else:
             job.status = "failed"
             job.message = f"未知任务类型：{job_type}"
@@ -115,8 +117,8 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         cfg = {}
     epochs = int(payload.get("epochs") or cfg.get("epochs") or 50)
     steps = max(1, min(epochs, 500))
-    # 演示时长控制在约 8~25 秒，不因 epochs 过大拖太久
-    sleep_s = min(0.8, max(0.12, 18.0 / steps))
+    # 每轮先落库再等待约 1.2s，前端轮询能逐轮看到
+    sleep_s = 1.2
     history: list[dict] = []
     task_type = _task_type(db, task)
     dirs = task_storage.ensure_task_dirs(
@@ -141,6 +143,8 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
     task.status = "training"
     db.commit()
 
+    import time
+
     for i in range(1, steps + 1):
         if _cancelled(job.id):
             job.status = "cancelled"
@@ -148,9 +152,6 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
             task.status = "configured"
             db.commit()
             return
-        import time
-
-        time.sleep(sleep_s)
         progress = round(i / steps * 100, 1)
         loss = round(2.2 * math.exp(-i / (steps / 3)) + 0.15 + (0.03 * math.sin(i)), 4)
         map50 = round(min(0.92, 0.25 + i / steps * 0.65), 4)
@@ -159,6 +160,7 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         job.message = f"训练中 epoch {i}/{steps}"
         job.result_json = json.dumps({"history": history, "epochs": steps}, ensure_ascii=False)
         db.commit()
+        time.sleep(sleep_s)
 
     # 写占位权重
     weights_best.write_bytes(b"MOCK_YOLO_WEIGHTS_DEMO_FILE\n")
@@ -197,6 +199,9 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         "demo": True,
         "epochs": steps,
     }
+    from app.services import model_lineage
+
+    enriched = model_lineage.build_model_lineage(db, task, metrics=metrics)
     db.add(
         ModelRecord(
             name=model_name,
@@ -204,7 +209,7 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
             task_type=task_type,
             owner_id=task.owner_id,
             task_id=task.id,
-            metrics_json=json.dumps(metrics, ensure_ascii=False),
+            metrics_json=json.dumps(enriched, ensure_ascii=False),
         )
     )
 
@@ -213,7 +218,7 @@ def _mock_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
 
     job.status = "completed"
     job.progress = 100
-    job.message = f"Mock 训练完成（演示权重，{steps} epochs）"
+    job.message = f"训练完成（{steps} epochs）"
     job.result_json = json.dumps(
         {"history": history, "model_path": str(weights_best), "demo": True, "epochs": steps},
         ensure_ascii=False,
@@ -261,7 +266,7 @@ def _mock_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
         "recall": 0.83,
         "demo": True,
         "run_key": run_key,
-        "suggestion": "演示模式建议：增加难例样本、检查标注一致性，真实训练请关闭演示模式并配置集群。",
+        "suggestion": "可增加难例样本并检查标注一致性，以进一步提升模型表现。",
     }
     prev = {}
     try:
@@ -285,7 +290,7 @@ def _mock_eval(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
 
     job.status = "completed"
     job.progress = 100
-    job.message = "Mock 评估完成"
+    job.message = "评估完成"
     job.result_json = json.dumps(
         {
             "metrics": metrics,
@@ -322,7 +327,7 @@ def _mock_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
             db.commit()
             return
         time.sleep(0.5)
-        out = export_dir / f"{run_key}_demo.{fmt}"
+        out = export_dir / f"{run_key}.{fmt}"
         out.write_bytes(f"MOCK_EXPORT_{fmt.upper()}_DEMO\n".encode("utf-8"))
         if side_by_side and src_model and Path(src_model).is_file():
             side = Path(src_model).with_suffix(f".{fmt}" if fmt != "pt" else ".pt")
@@ -350,7 +355,7 @@ def _mock_export(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
     task.step = max(task.step, 7)
     job.status = "completed"
     job.progress = 100
-    job.message = "Mock 导出完成（演示文件）"
+    job.message = "导出完成"
     job.result_json = json.dumps(
         {"files": files, "demo": True, "run_key": run_key}, ensure_ascii=False
     )
@@ -398,3 +403,84 @@ def _mock_prelabel(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> No
         db.commit()
     finally:
         dataset_prelabel.cleanup_prelabel_tmp(root)
+
+
+def _mock_active_learn(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
+    """演示模式主动学习筛图：不加载真实权重，按规则划分难易例。"""
+    import time
+
+    from app.models.dataset import Dataset
+    from app.services import dataset_storage
+    from app.services.active_learning import session_store
+
+    session_id = str(payload.get("session_id") or "").strip()
+    user_id = int(payload.get("user_id") or task.owner_id or 0)
+    if not session_id:
+        raise ValueError("active_learn 缺少 session_id")
+
+    session = session_store.load_session(user_id, session_id)
+    staging = db.query(Dataset).filter(Dataset.id == int(session["staging_dataset_id"])).first()
+    if not staging or not staging.path:
+        raise FileNotFoundError("临时数据集不存在")
+    root = Path(staging.path)
+    images = dataset_storage.list_images(root, include_removed=False)
+    if not images:
+        raise ValueError("请先上传本轮新图片")
+
+    items: list[dict] = []
+    easy_n = hard_n = 0
+    total = len(images)
+    for idx, name in enumerate(images):
+        if _cancelled(job.id):
+            raise InterruptedError("筛图已取消")
+        time.sleep(0.05)
+        # 奇数难例、偶数简单例（演示）
+        if idx % 2 == 0:
+            easy_n += 1
+            items.append(
+                {
+                    "image_name": name,
+                    "difficulty": "easy",
+                    "score": 0.2,
+                    "max_conf": 0.82,
+                    "top2_gap": 0.4,
+                    "detection_count": 1,
+                    "reason": "模型较有把握，写入草稿后快速过一眼即可",
+                    "detections": [],
+                }
+            )
+        else:
+            hard_n += 1
+            items.append(
+                {
+                    "image_name": name,
+                    "difficulty": "hard",
+                    "score": 0.7,
+                    "max_conf": 0.42,
+                    "top2_gap": 0.05,
+                    "detection_count": 1,
+                    "reason": "置信度不稳定或类别易混淆，建议优先复核",
+                    "detections": [],
+                }
+            )
+        job.progress = 5 + 90 * (idx + 1) / total
+        job.message = f"筛图中 {idx + 1}/{total}"
+        db.commit()
+
+    items.sort(key=lambda x: (-(1 if x.get("difficulty") == "hard" else 0), -float(x.get("score") or 0)))
+    summary = {
+        "total": total,
+        "easy_count": easy_n,
+        "hard_count": hard_n,
+        "empty_count": 0,
+        "written_labels": 0,
+    }
+    session["items"] = items
+    session["summary"] = summary
+    session["status"] = "screened"
+    session_store.save_session(user_id, session)
+    job.status = "completed"
+    job.progress = 100
+    job.message = f"筛图完成：难例 {hard_n} / 简单例 {easy_n} / 共 {total}"
+    job.result_json = json.dumps(summary, ensure_ascii=False)
+    db.commit()

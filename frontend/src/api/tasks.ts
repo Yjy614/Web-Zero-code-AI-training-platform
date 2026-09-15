@@ -57,6 +57,13 @@ export interface ModelItem {
   created_at?: string
   has_pt?: boolean
   has_onnx?: boolean
+  /** 训练血缘：原数据集与续训父模型 */
+  dataset_id?: number | null
+  dataset_name?: string | null
+  parent_model_id?: number | null
+  parent_weight?: string | null
+  /** 展示用：父模型权重文件名，如 ties.pt */
+  parent_weight_label?: string | null
 }
 
 export function listTasks() {

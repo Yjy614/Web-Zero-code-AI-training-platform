@@ -62,6 +62,8 @@ def _run_job_sync(job_id: int, job_type: str, payload: dict[str, Any]) -> None:
             _local_export(db, job, task, payload)
         elif job_type == "prelabel":
             _local_prelabel(db, job, task, payload)
+        elif job_type == "active_learn":
+            _local_active_learn(db, job, task, payload)
         else:
             job.status = "failed"
             job.message = f"未知任务类型：{job_type}"
@@ -137,7 +139,7 @@ def _register_model(
     每次训练新增一条模型库记录；权重复制到独立归档路径：
     models/<tt>/<user>/<task_name>/<run_key>/<run_key>.pt
     """
-    from app.services import model_artifacts
+    from app.services import model_artifacts, model_lineage
 
     username = username_by_id(db, task.owner_id)
     stems = task_storage.collect_archived_model_stems(username, task.name, task_type)
@@ -157,7 +159,9 @@ def _register_model(
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{name}.pt"
     shutil.copy2(weights_best, dest)
-    payload = json.dumps(metrics, ensure_ascii=False)
+    # 写入溯源：原数据集、训练参数、父权重等，供主动学习/续训使用
+    enriched = model_lineage.build_model_lineage(db, task, metrics=metrics)
+    payload = json.dumps(enriched, ensure_ascii=False)
     db.add(
         ModelRecord(
             name=name,
@@ -185,7 +189,7 @@ def _local_train(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None
 
     ds = db.query(Dataset).filter(Dataset.id == task.dataset_id).first()
     task_type = (ds.task_type if ds else None) or "detect"
-    weight_path = resolve_pretrained_weight(weight_name, task_type)
+    weight_path = resolve_pretrained_weight(weight_name, task_type, db=db)
     data_yaml = _dataset_yaml(db, task)
     username = username_by_id(db, task.owner_id)
     dirs = task_storage.ensure_task_dirs(username, task.name, task_type)
@@ -696,3 +700,40 @@ def _local_prelabel(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> N
         db.commit()
     finally:
         dataset_prelabel.cleanup_prelabel_tmp(root)
+
+
+def _local_active_learn(db, job: Job, task: TrainTask, payload: dict[str, Any]) -> None:
+    """主动学习筛图 Job。"""
+    from app.services.active_learning import pipeline as al_pipeline
+
+    session_id = str(payload.get("session_id") or "").strip()
+    user_id = int(payload.get("user_id") or task.owner_id or 0)
+    if not session_id:
+        raise ValueError("active_learn 缺少 session_id")
+
+    def update_progress(progress: float, message: str) -> None:
+        job.progress = float(progress)
+        job.message = message
+        db.commit()
+
+    try:
+        result = al_pipeline.run_screen_job(
+            db,
+            user_id=user_id,
+            session_id=session_id,
+            update_progress=update_progress,
+            is_cancelled=lambda: job_control.is_cancelled(job.id),
+        )
+        job.status = "completed"
+        job.progress = 100
+        summary = result.get("summary") or {}
+        job.message = (
+            f"筛图完成：难例 {summary.get('hard_count', 0)} / "
+            f"简单例 {summary.get('easy_count', 0)} / 共 {summary.get('total', 0)}"
+        )
+        job.result_json = json.dumps(summary, ensure_ascii=False)
+        db.commit()
+    except InterruptedError:
+        job.status = "cancelled"
+        job.message = "筛图已取消"
+        db.commit()

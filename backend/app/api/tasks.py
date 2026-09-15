@@ -210,7 +210,7 @@ async def start_train(task_id: int, user: User = Depends(get_current_user), db: 
     if not is_demo_mode():
         tt = ds.task_type or "detect"
         try:
-            resolve_pretrained_weight(cfg.pretrained_weight, tt)
+            resolve_pretrained_weight(cfg.pretrained_weight, tt, db=db)
         except FileNotFoundError as e:
             raise HTTPException(status_code=400, detail={"code": "weight_missing", "message": str(e)}) from e
         try:

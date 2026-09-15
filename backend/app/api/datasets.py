@@ -106,11 +106,20 @@ def list_datasets(
         tt = normalize_task_type(task_type)
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"code": "bad_task_type", "message": str(e)}) from e
+    from app.services.active_learning.staging import cleanup_orphaned_staging, is_active_learn_staging
+
+    # 顺带清理悬空 AL 临时集（中断未并入的）
+    try:
+        cleanup_orphaned_staging(db, user)
+    except Exception:  # noqa: BLE001
+        pass
+
     q = db.query(Dataset).filter(Dataset.task_type == tt)
     if user.role != "admin":
         q = q.filter(Dataset.owner_id == user.id)
     rows = q.order_by(Dataset.id.desc()).all()
-    return [_to_out(r) for r in rows]
+    # 主动学习临时集在并入确认前不出现在数据集管理
+    return [_to_out(r) for r in rows if not is_active_learn_staging(r)]
 
 
 @router.post("", response_model=DatasetOut, status_code=status.HTTP_201_CREATED)

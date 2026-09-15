@@ -183,14 +183,18 @@ def open_annotate(
 
 
 def _ensure_task_for_dataset(db: Session, ds: Dataset, user: User) -> TrainTask:
-    existing = (
+    from app.services.agent_train_ops import _is_agent_task_name
+
+    # 仅复用 Agent 命名任务，避免占用向导 *_train
+    candidates = (
         db.query(TrainTask)
         .filter(TrainTask.owner_id == user.id, TrainTask.dataset_id == ds.id)
         .order_by(TrainTask.id.desc())
-        .first()
+        .all()
     )
-    if existing:
-        return existing
+    for existing in candidates:
+        if _is_agent_task_name(existing.name):
+            return existing
     name = f"{ds.name}_agent"
     base = name
     n = 1
@@ -329,7 +333,9 @@ def list_models(
         q = q.filter(ModelRecord.owner_id == user.id)
     if task_type:
         q = q.filter(ModelRecord.task_type == normalize_task_type(task_type))
-    rows = q.order_by(ModelRecord.id.desc()).limit(40).all()
+    from app.services import model_artifacts
+
+    rows = q.order_by(ModelRecord.id.desc()).limit(80).all()
     items = [
         {
             "id": r.id,
@@ -338,7 +344,8 @@ def list_models(
             "task_id": r.task_id,
         }
         for r in rows
-    ]
+        if model_artifacts.find_pt_path(r) is not None
+    ][:40]
     return {
         "count": len(items),
         "models": items,

@@ -111,6 +111,12 @@ class ModelOut(BaseModel):
     # 是否有可下载的 .pt / .onnx
     has_pt: bool = False
     has_onnx: bool = False
+    # 训练血缘：原数据集与续训父权重
+    dataset_id: int | None = None
+    dataset_name: str | None = None
+    parent_model_id: int | None = None
+    parent_weight: str | None = None
+    parent_weight_label: str | None = None
 
 
 class DetectItemOut(BaseModel):

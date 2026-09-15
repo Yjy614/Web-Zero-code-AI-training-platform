@@ -2,8 +2,6 @@
 import { computed, nextTick, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
-import { useAppStore } from '@/stores/app'
-import { useAuthStore } from '@/stores/auth'
 import { fetchDevices, type DeviceItem } from '@/api/system'
 import {
   cancelJob,
@@ -41,11 +39,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:step': [step: number]
 }>()
-
-const appStore = useAppStore()
-const authStore = useAuthStore()
-/** 演示相关文案仅管理员可见 */
-const showDemoHint = computed(() => appStore.demoMode && authStore.isAdmin)
 
 const loading = ref(false)
 const task = ref<TaskItem | null>(null)
@@ -202,17 +195,32 @@ const exportFiles = computed(() => {
   return Array.isArray(files) ? (files as Array<{ name: string; format: string; demo?: boolean }>) : []
 })
 
+/** Agent / 主动学习创建的任务：向导不应复用，避免模型名带 agent */
+function isNonWizardTaskName(name?: string) {
+  const n = (name || '').trim().toLowerCase()
+  if (!n) return false
+  if (/(^|_)agent(_|$)/.test(n)) return true
+  if (/_al_/.test(n)) return true
+  return false
+}
+
 async function ensureTask() {
-  if (task.value && task.value.dataset_id === props.datasetId) return task.value
+  if (task.value && task.value.dataset_id === props.datasetId) {
+    // 已绑到 Agent 任务时，改绑到向导任务，避免继续产出 *_agent 模型名
+    if (!isNonWizardTaskName(task.value.name)) return task.value
+    task.value = null
+  }
   const { data: list } = await listTasks()
-  const found = list.find((t) => t.dataset_id === props.datasetId)
+  const found = list.find(
+    (t) => t.dataset_id === props.datasetId && !isNonWizardTaskName(t.name),
+  )
   if (found) {
     task.value = found
     applyConfig(found)
     restoreConfigDraft()
     return found
   }
-  if (!taskName.value.trim()) {
+  if (!taskName.value.trim() || isNonWizardTaskName(taskName.value)) {
     taskName.value = `${props.datasetName}_train`
   }
   restoreConfigDraft()
@@ -436,7 +444,7 @@ async function pollJob(jobId: number) {
     } catch {
       // 轮询失败不打断
     }
-  }, 1200)
+  }, 400)
 }
 
 /**
@@ -786,7 +794,7 @@ onUnmounted(() => {
           <h4 class="card-title card-title-solo">基础配置</h4>
           <div class="form-grid">
             <label>训练任务名</label>
-            <el-input v-model="taskName" :disabled="Boolean(task)" placeholder="如 demo_detect_train" />
+            <el-input v-model="taskName" :disabled="Boolean(task)" placeholder="如 detect_train" />
 
             <label>数据划分</label>
             <SplitRatioBar
@@ -890,9 +898,6 @@ onUnmounted(() => {
         </aside>
       </div>
       <p v-if="splitInfo" class="muted">{{ splitInfo }}</p>
-      <p v-if="showDemoHint" class="muted">
-        当前为演示模式：训练将走 Mock。关闭演示模式并上传真实 .pt 后可本机真实训练。
-      </p>
       <div class="actions">
         <el-button @click="emit('update:step', 2)">上一步</el-button>
         <el-button type="primary" @click="goNextToTrain">下一步：训练</el-button>
@@ -903,11 +908,7 @@ onUnmounted(() => {
     <div v-else-if="step === 4" class="step-body">
       <h3>步骤 5 · 训练</h3>
       <p class="muted">
-        {{
-          showDemoHint
-            ? '演示模式按配置的 epochs 生成假曲线。点击「开始训练」后显示曲线；本流程内切换步骤会保留曲线。'
-            : '按配置 epochs 运行训练，曲线随进度更新。本流程内切换步骤会保留曲线，仅再次开训时清空。'
-        }}
+        按配置 epochs 运行训练，曲线随进度更新。本流程内切换步骤会保留曲线，仅再次开训时清空。
       </p>
       <div class="actions">
         <el-button type="primary" :disabled="job?.status === 'running'" @click="onTrain">开始训练</el-button>
@@ -967,8 +968,7 @@ onUnmounted(() => {
     <div v-else-if="step === 6" class="step-body">
       <h3>步骤 7 · 导出</h3>
       <p class="muted">
-        {{ showDemoHint ? '演示模式生成 PT/ONNX 占位文件。' : '导出 PT，并尝试导出 ONNX。' }}
-        完成后可返回导入步，准备下一轮训练。
+        导出 PT，并尝试导出 ONNX。完成后可返回导入步，准备下一轮训练。
       </p>
       <div class="actions">
         <el-button type="primary" @click="onExport">导出 PT / ONNX</el-button>
@@ -981,7 +981,7 @@ onUnmounted(() => {
       </div>
       <ul class="export-list">
         <li v-for="f in exportFiles" :key="f.name">
-          <span>{{ (f.name || '').split(/[/\\]/).pop() }}{{ f.demo ? '（演示文件）' : '' }}</span>
+          <span>{{ (f.name || '').split(/[/\\]/).pop() }}</span>
           <el-button
             v-if="task"
             link

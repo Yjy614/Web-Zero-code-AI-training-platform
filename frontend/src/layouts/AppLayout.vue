@@ -17,7 +17,6 @@ import {
   Share,
   VideoCamera,
 } from '@element-plus/icons-vue'
-import DemoBanner from '@/components/DemoBanner.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 
@@ -156,7 +155,6 @@ async function onLogout() {
     </aside>
 
     <div class="main">
-      <DemoBanner :visible="app.demoMode && auth.isAdmin" />
       <header class="topbar">
         <div>
           <h1>{{ pageTitle }}</h1>

@@ -49,7 +49,7 @@ async function onSubmit() {
         <ul class="hero-points">
           <li>七步向导，对齐桌面检测流程</li>
           <li>数据集上云，便于集群训练调度</li>
-          <li>演示模式可无 GPU 完整走通</li>
+          <li>浏览器即可完成标注、训练与模型试用</li>
         </ul>
       </div>
     </section>
@@ -57,7 +57,7 @@ async function onSubmit() {
     <section class="form-panel">
       <div class="form-card fade-up" style="animation-delay: 0.12s">
         <h2>欢迎登录</h2>
-        <p class="sub">使用管理员或演示账号进入系统</p>
+        <p class="sub">请使用分配的账号登录</p>
 
         <el-form label-position="top" @submit.prevent="onSubmit">
           <el-form-item label="用户名">
@@ -84,7 +84,7 @@ async function onSubmit() {
         </el-form>
 
         <div class="hint">
-          <span>演示账号：admin / admin123</span>
+          <span>管理员：admin / admin123</span>
           <span>使用人员：demo / demo123</span>
         </div>
       </div>

@@ -259,6 +259,29 @@ function clampReachableStep(step: number): number {
   return target
 }
 
+/**
+ * 按 URL 指定打开数据集并跳到目标步骤。
+ * 主动学习临时集不在 listDatasets 中，不能要求「必须出现在下拉列表」。
+ */
+async function applyExternalDatasetJump(datasetId: number, step?: number) {
+  currentId.value = datasetId
+  await refreshCurrent()
+  if (!current.value) {
+    ElMessage.warning('数据集不存在或无权访问')
+    return false
+  }
+  // 临时注入列表，便于向导内展示当前集名称；刷新列表后仍可能消失，属预期
+  if (!datasets.value.some((d) => d.id === datasetId)) {
+    datasets.value = [current.value, ...datasets.value]
+  }
+  await refreshImages()
+  const targetStep = step != null && Number.isFinite(step) && step >= 0 ? step : 2
+  active.value = clampReachableStep(targetStep)
+  if (active.value === 1) await prepareCleanStep()
+  persistWizardState()
+  return true
+}
+
 async function hydrateWizard() {
   await refreshDatasets()
   const saved = readWizardState()
@@ -268,28 +291,25 @@ async function hydrateWizard() {
   let targetStep = 0
 
   if (qid) {
-    // 外部带入 datasetId；若带 step 则跳到指定步骤（如编排页「去标注」→ step=2）
+    // 外部带入 datasetId；若带 step 则跳到指定步骤（主动学习复核 → step=2 标注）
     targetDataset = qid
     const qStep = Number(route.query.step)
     if (Number.isFinite(qStep) && qStep >= 0) {
       targetStep = qStep
     } else {
-      targetStep = saved?.datasetId === qid ? saved.step ?? 0 : 0
+      targetStep = saved?.datasetId === qid ? saved.step ?? 0 : 2
     }
+    await applyExternalDatasetJump(targetDataset, targetStep)
   } else if (saved?.datasetId) {
     // 同一次登录内从其他菜单返回：恢复会话进度（登出后会清空）
     targetDataset = saved.datasetId
     targetStep = saved.step ?? 0
-  }
-
-  if (targetDataset) {
     currentId.value = targetDataset
     await refreshCurrent()
     await refreshImages()
     const clamped = clampReachableStep(targetStep)
     active.value = clamped
     if (active.value === 1) await prepareCleanStep()
-    // 仅在未因临时条件降级时写回，避免把已保存的第4步冲成更早步骤
     if (clamped >= targetStep) persistWizardState()
     else {
       try {
@@ -484,20 +504,14 @@ onActivated(async () => {
   const qStepRaw = route.query.step
   const qStep =
     qStepRaw != null && String(qStepRaw) !== '' ? Number(qStepRaw) : Number.NaN
-  if (qid && datasets.value.some((d) => d.id === qid)) {
+  // 主动学习临时集不在数据集列表中，仍须按 query 跳到标注步（step=2）
+  if (qid) {
     loading.value = true
     try {
-      if (qid !== currentId.value) {
-        await selectDataset(qid)
-      } else {
-        await refreshCurrent()
-        await refreshImages()
-      }
-      if (Number.isFinite(qStep) && qStep >= 0) {
-        active.value = clampReachableStep(qStep)
-        if (active.value === 1) await prepareCleanStep()
-        persistWizardState()
-      }
+      await applyExternalDatasetJump(
+        qid,
+        Number.isFinite(qStep) && qStep >= 0 ? qStep : 2,
+      )
     } finally {
       loading.value = false
     }

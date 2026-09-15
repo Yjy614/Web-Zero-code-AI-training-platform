@@ -62,6 +62,12 @@ const router = createRouter({
           meta: { title: '模型库', menuKey: 'models' },
         },
         {
+          path: 'resources/active-learn',
+          name: 'active-learn',
+          component: () => import('@/views/resources/ActiveLearnView.vue'),
+          meta: { title: '主动学习', menuKey: 'models' },
+        },
+        {
           path: 'resources/infer',
           name: 'infer',
           component: () => import('@/views/resources/InferView.vue'),

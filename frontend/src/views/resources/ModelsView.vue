@@ -4,7 +4,7 @@
  * 卡片：右上角删除；下方 PT / ONNX 按钮样式统一；转 ONNX 时按钮内淡进度条。
  */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Box, Close, Download } from '@element-plus/icons-vue'
 import {
@@ -18,6 +18,7 @@ import {
 import { taskTypeLabel } from '@/utils/taskType'
 
 const route = useRoute()
+const router = useRouter()
 
 const TASK_FILTERS = [
   { value: 'all', label: '全部' },
@@ -86,6 +87,19 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function canActiveLearn(row: ModelItem) {
+  const tt = row.task_type || 'detect'
+  return ['detect', 'segment', 'pose'].includes(tt) && row.has_pt !== false
+}
+
+function onActiveLearn(row: ModelItem) {
+  if (!canActiveLearn(row)) {
+    ElMessage.info('请选择带 PT 权重的检测 / 分割 / 姿态模型')
+    return
+  }
+  router.push({ path: '/app/resources/active-learn', query: { modelId: String(row.id) } })
 }
 
 async function onDownloadPt(row: ModelItem) {
@@ -206,6 +220,22 @@ function displayModelName(name?: string) {
   return raw.replace(/-best$/i, '')
 }
 
+/** 卡片悬停提示：数据集 / 续训权重 / 任务 */
+function lineageTitle(row: ModelItem) {
+  const parts: string[] = []
+  if (row.dataset_id) parts.push(`数据集 #${row.dataset_id}`)
+  if (row.dataset_name) parts.push(row.dataset_name)
+  const fromW = parentWeightText(row)
+  if (fromW) parts.push(`续训自 ${fromW}`)
+  if (row.task_id) parts.push(`任务 #${row.task_id}`)
+  return parts.join(' · ') || '无血缘信息'
+}
+
+/** 续训来源：仅展示父模型权重文件名，不展示 #id 或官方预训练名 */
+function parentWeightText(row: ModelItem) {
+  return (row.parent_weight_label || '').trim()
+}
+
 function formatTime(v?: string) {
   if (!v) return '—'
   const raw = v.trim()
@@ -323,6 +353,14 @@ onUnmounted(() => {
               </span>
               <span class="meta-time">{{ formatTime(row.created_at) }}</span>
             </div>
+            <p v-if="row.dataset_name || row.dataset_id || parentWeightText(row)" class="lineage" :title="lineageTitle(row)">
+              <template v-if="row.dataset_name || row.dataset_id">
+                数据：{{ row.dataset_name || `#${row.dataset_id}` }}
+              </template>
+              <template v-if="parentWeightText(row)">
+                {{ row.dataset_name || row.dataset_id ? ' · ' : '' }}续训自 {{ parentWeightText(row) }}
+              </template>
+            </p>
           </div>
         </div>
         <div class="metric-row">
@@ -374,6 +412,15 @@ onUnmounted(() => {
               <template v-else>转ONNX</template>
             </el-button>
           </div>
+          <el-button
+            type="primary"
+            class="action-btn al-btn"
+            :disabled="!canActiveLearn(row)"
+            :title="canActiveLearn(row) ? '主动学习：筛难例并续训' : '需要 PT 权重（检测/分割/姿态）'"
+            @click="onActiveLearn(row)"
+          >
+            主动学习
+          </el-button>
         </div>
       </article>
     </div>
@@ -587,6 +634,15 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.lineage {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #6a7c88;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .tag {
   display: inline-flex;
   flex-shrink: 0;
@@ -648,7 +704,9 @@ onUnmounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
   align-items: stretch;
-  height: 32px;
+}
+.card-actions .al-btn {
+  grid-column: 1 / -1;
 }
 .card-actions :deep(.action-btn) {
   width: 100%;

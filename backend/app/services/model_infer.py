@@ -33,7 +33,7 @@ def resolve_infer_weight(*, pt: Path | None, onnx: Path | None) -> tuple[Path, s
     if pt and pt.is_file():
         if _is_mock_weight(pt):
             raise InferError(
-                "当前为演示占位权重，无法推理。请关闭演示模式并用真实训练产出的模型重试。",
+                "当前权重文件无法用于推理，请使用训练产出的有效 PT 模型后重试。",
                 code="mock_weight",
             )
         return pt, "pt"

@@ -174,7 +174,10 @@ async function saveEndpoint(kind: 'llm' | 'vision') {
               }}
             </dd>
           </div>
-          <div><dt>禁止权重下载</dt><dd>{{ settings.forbid_weight_download ? '是' : '否' }}</dd></div>
+          <div v-if="canEdit">
+            <dt>禁止权重下载</dt>
+            <dd>{{ settings.forbid_weight_download ? '是' : '否' }}</dd>
+          </div>
         </dl>
       </div>
 

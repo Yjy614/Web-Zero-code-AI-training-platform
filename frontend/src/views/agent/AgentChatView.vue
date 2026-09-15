@@ -44,6 +44,8 @@ const renameDraft = ref('')
 const uploading = ref(false)
 const uploadPercent = ref(0)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+/** 底部输入框：回答结束后自动聚焦，避免还要点一次才能继续打字 */
+const composerInputRef = ref<{ focus: () => void } | null>(null)
 /** 流式状态文案：先思考，再按需显示工具进度 */
 const liveStatus = ref('')
 const liveThinking = ref('')
@@ -198,6 +200,7 @@ async function onJobFinished() {
     streamAbort = null
     stopJobPoll()
     if (session.value?.pending_job?.job_id) startJobPoll()
+    await focusComposer()
   }
 }
 
@@ -244,7 +247,7 @@ function startJobPoll() {
   void tick()
   jobTimer = window.setInterval(() => {
     void tick()
-  }, 2500)
+  }, 400)
 }
 
 watch(
@@ -290,9 +293,18 @@ async function onNewChat() {
     session.value = data
     await refreshSessions()
     await scrollBottom(true)
+    await focusComposer()
   } catch {
     // 拦截器
   }
+}
+
+/** 把光标放回底部输入框（disabled 解除后需等一帧再 focus） */
+async function focusComposer() {
+  if (sending.value || uploading.value) return
+  if (intentVisible.value || annotateVisible.value || renamingId.value) return
+  await nextTick()
+  composerInputRef.value?.focus()
 }
 
 async function onDeleteSession(id: string, ev?: Event) {
@@ -561,6 +573,7 @@ async function sendText(text: string) {
     }
     await refreshSessions()
     await scrollBottom()
+    await focusComposer()
   }
 }
 
@@ -1140,6 +1153,7 @@ onActivated(() => {
   void scrollBottom(true)
   // 从首页等再次带 query 进入时处理；首挂载由 onMounted 负责
   if (route.query.fresh || route.query.q) void applyEntryQuery()
+  else void focusComposer()
 })
 
 /** 处理首页等入口带入的 query：fresh / q（不再自动代发引导话术） */
@@ -1375,6 +1389,7 @@ onUnmounted(() => stopJobPoll())
         />
         <div class="composer-card" :class="{ busy: uploading }">
           <el-input
+            ref="composerInputRef"
             v-model="draft"
             class="composer-input"
             type="textarea"

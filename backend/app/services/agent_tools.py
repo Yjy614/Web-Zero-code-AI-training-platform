@@ -367,10 +367,16 @@ def _list_datasets_tool(db: Session, user: User, args: dict[str, Any]) -> dict[s
     types = [normalize_task_type(str(raw_tt))] if raw_tt else list(TASK_TYPE_LABELS.keys())
     groups: list[dict[str, Any]] = []
     for tt in types:
+        from app.services.active_learning.staging import is_active_learn_staging
+
         q = db.query(Dataset).filter(Dataset.task_type == tt)
         if user.role != "admin":
             q = q.filter(Dataset.owner_id == user.id)
-        rows = q.order_by(Dataset.id.desc()).limit(50).all()
+        rows = [
+            r
+            for r in q.order_by(Dataset.id.desc()).limit(80).all()
+            if not is_active_learn_staging(r)
+        ][:50]
         groups.append(
             {
                 "task_type": tt,
