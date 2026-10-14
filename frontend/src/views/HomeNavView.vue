@@ -12,7 +12,6 @@ import {
   Collection,
   Cpu,
   Crop,
-  List,
   MagicStick,
   PictureFilled,
   Setting,
@@ -81,14 +80,6 @@ const showWizards = computed(() => wizardCards.value.length > 0)
 const moreCards = computed((): NavCard[] =>
   (
     [
-      {
-        key: 'orch',
-        title: '流程编排',
-        desc: '固定流水线式编排',
-        path: '/app/agent/orchestrate',
-        icon: List,
-        menuKey: 'agent_orchestrate' as const,
-      },
       {
         key: 'datasets',
         title: '数据集管理',

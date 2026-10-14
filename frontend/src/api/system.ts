@@ -30,7 +30,6 @@ export interface MenuVisibility {
   models: boolean
   infer: boolean
   agent_chat: boolean
-  agent_orchestrate: boolean
   weights: boolean
   settings: boolean
 }
@@ -43,7 +42,6 @@ export const DEFAULT_MENU_VISIBILITY: MenuVisibility = {
   models: true,
   infer: true,
   agent_chat: true,
-  agent_orchestrate: true,
   weights: true,
   settings: true,
 }
@@ -57,7 +55,6 @@ export const MENU_PATH_BY_KEY: Record<keyof MenuVisibility, string> = {
   models: '/app/resources/models',
   infer: '/app/resources/infer',
   agent_chat: '/app/agent/chat',
-  agent_orchestrate: '/app/agent/orchestrate',
   weights: '/app/resources/weights',
   settings: '/app/settings',
 }
@@ -70,7 +67,6 @@ export const MENU_LABEL_BY_KEY: Record<keyof MenuVisibility, string> = {
   models: '模型库',
   infer: '推理试用',
   agent_chat: 'AI Agent',
-  agent_orchestrate: '流程编排',
   weights: '基础模型权重仓库',
   settings: '系统设置',
 }

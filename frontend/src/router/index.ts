@@ -86,12 +86,6 @@ const router = createRouter({
           meta: { title: 'AI Agent', menuKey: 'agent_chat' },
         },
         {
-          path: 'agent/orchestrate',
-          name: 'agent-orchestrate',
-          component: () => import('@/views/agent/AgentOrchestrateView.vue'),
-          meta: { title: 'AI 流程编排', menuKey: 'agent_orchestrate' },
-        },
-        {
           path: 'settings',
           name: 'settings',
           component: () => import('@/views/SettingsView.vue'),

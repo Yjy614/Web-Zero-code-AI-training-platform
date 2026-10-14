@@ -23,14 +23,23 @@ export const useAppStore = defineStore('app', () => {
   async function loadMenuVisibility() {
     try {
       const { data } = await fetchSettings()
-      menuVisibility.value = { ...DEFAULT_MENU_VISIBILITY, ...(data.menu_visibility || {}) }
+      const next = { ...DEFAULT_MENU_VISIBILITY }
+      const raw = data.menu_visibility || {}
+      for (const key of Object.keys(DEFAULT_MENU_VISIBILITY) as Array<keyof MenuVisibility>) {
+        if (raw[key] !== undefined) next[key] = Boolean(raw[key])
+      }
+      menuVisibility.value = next
     } catch {
       menuVisibility.value = { ...DEFAULT_MENU_VISIBILITY }
     }
   }
 
   function setMenuVisibility(vis: MenuVisibility) {
-    menuVisibility.value = { ...DEFAULT_MENU_VISIBILITY, ...vis }
+    const next = { ...DEFAULT_MENU_VISIBILITY }
+    for (const key of Object.keys(DEFAULT_MENU_VISIBILITY) as Array<keyof MenuVisibility>) {
+      if (vis[key] !== undefined) next[key] = Boolean(vis[key])
+    }
+    menuVisibility.value = next
   }
 
   async function bootstrap() {

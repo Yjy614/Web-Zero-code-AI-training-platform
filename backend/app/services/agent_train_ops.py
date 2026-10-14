@@ -16,11 +16,56 @@ from app.models.user import User
 from app.runners.mock_runner import get_runner
 from app.schemas.task import TrainConfig
 from app.services import dataset_prelabel, model_artifacts, model_infer, task_storage, yolo_split
-from app.services.agent_orchestrate import _default_weight_name, _normalize_train_device
 from app.services.runtime_settings import is_demo_mode
 from app.services.weight_resolve import normalize_weight_name, resolve_pretrained_weight
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+
+def _default_weight_name(task_type: str) -> str:
+    """按任务类型挑选仓库中可用的默认预训练权重名。"""
+    tt = normalize_task_type(task_type)
+    if tt == "segment":
+        preferred = ("yolov8n-seg.pt", "yolo11n-seg.pt", "yolov8s-seg.pt")
+    elif tt == "pose":
+        preferred = ("yolo11n-pose.pt", "yolov8n-pose.pt", "yolo11s-pose.pt", "yolov8s-pose.pt")
+    else:
+        preferred = ("yolov8n.pt", "yolo11n.pt", "yolov8s.pt")
+    for name in preferred:
+        try:
+            resolve_pretrained_weight(name, tt)
+            return name
+        except FileNotFoundError:
+            continue
+    files = task_storage.list_weight_files(tt)
+    for item in files:
+        name = str(item.get("name") or "")
+        if name.lower().endswith(".pt"):
+            return name
+    return preferred[0]
+
+
+def _normalize_train_device(device: str) -> str:
+    """将设备字符串规范化为本机可用 id（cpu / cuda:N）。无 CUDA 时回退 cpu。"""
+    raw = (device or "cpu").strip().lower()
+    if raw in {"", "cpu"}:
+        return "cpu"
+    if raw in {"gpu", "cuda"}:
+        raw = "cuda:0"
+    if raw.isdigit():
+        raw = f"cuda:{raw}"
+    allowed = {"cpu"}
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            for i in range(int(torch.cuda.device_count())):
+                allowed.add(f"cuda:{i}")
+    except ImportError:
+        pass
+    if raw in allowed:
+        return raw
+    return "cpu"
 
 
 def get_dataset(

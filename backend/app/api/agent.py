@@ -1,4 +1,4 @@
-"""AI 流程编排 API。"""
+"""对话式 AI Agent API。"""
 
 from __future__ import annotations
 
@@ -10,11 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
-from app.core.task_types import normalize_task_type
-from app.models.dataset import Dataset
-from app.models.train import Job
 from app.models.user import User
-from app.runners.mock_runner import get_runner
 from app.schemas.agent import (
     AgentChatCreateRequest,
     AgentChatRenameRequest,
@@ -22,148 +18,10 @@ from app.schemas.agent import (
     AgentChatSessionOut,
     AgentChatSessionSummary,
     AgentChatTurnOut,
-    AgentPlanOut,
-    AgentPlanPatchRequest,
-    AgentPlanRequest,
-    AgentRunStepOut,
-    AgentRunStepRequest,
 )
-from app.services import agent_chat, agent_orchestrate
+from app.services import agent_chat
 
-router = APIRouter(prefix="/agent", tags=["AI编排"])
-
-
-def _get_dataset(db: Session, dataset_id: int, user: User) -> Dataset:
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-    if not ds:
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "数据集不存在"})
-    if user.role != "admin" and ds.owner_id != user.id:
-        raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "无权使用该数据集"})
-    return ds
-
-
-def _load_owned_plan(user: User, plan_id: str) -> AgentPlanOut:
-    plan = agent_orchestrate.load_plan(user.id, plan_id)
-    if not plan and user.role == "admin":
-        # 管理员不可跨用户扫盘；仅本用户计划
-        pass
-    if not plan:
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "编排计划不存在"})
-    if plan.owner_id != user.id and user.role != "admin":
-        raise HTTPException(status_code=403, detail={"code": "forbidden", "message": "无权访问该计划"})
-    return plan
-
-
-@router.post("/plan", response_model=AgentPlanOut)
-def create_agent_plan(
-    body: AgentPlanRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> AgentPlanOut:
-    """根据自然语言与数据集生成逐步确认的编排计划。"""
-    ds = _get_dataset(db, body.dataset_id, user)
-    try:
-        tt = normalize_task_type(body.task_type or ds.task_type or "detect")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "bad_task_type", "message": str(e)}) from e
-    if (ds.task_type or "detect") != tt:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "task_type_mismatch",
-                "message": f"数据集类型为 {ds.task_type}，与请求 {tt} 不一致",
-            },
-        )
-    body.task_type = tt
-    return agent_orchestrate.generate_plan(db, user, body, ds)
-
-
-@router.get("/plans/{plan_id}", response_model=AgentPlanOut)
-def get_agent_plan(plan_id: str, user: User = Depends(get_current_user)) -> AgentPlanOut:
-    return _load_owned_plan(user, plan_id)
-
-
-@router.post("/plans/{plan_id}/steps/run", response_model=AgentRunStepOut)
-async def run_agent_step(
-    plan_id: str,
-    body: AgentRunStepRequest | None = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> AgentRunStepOut:
-    """确认并执行当前步骤（或跳过）。"""
-    plan = _load_owned_plan(user, plan_id)
-    action = (body.action if body else "run") or "run"
-    runner = get_runner()
-
-    async def submit_job(job_type: str, payload: dict) -> None:
-        await runner.submit(job_type, payload)
-
-    try:
-        plan, message = await agent_orchestrate.run_current_step(
-            db=db,
-            user=user,
-            plan=plan,
-            action=action,
-            submit_job=submit_job,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "step_failed", "message": str(e)}) from e
-    return AgentRunStepOut(plan=plan, message=message)
-
-
-@router.post("/plans/{plan_id}/steps/ack-job", response_model=AgentRunStepOut)
-def ack_agent_job(
-    plan_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> AgentRunStepOut:
-    """当前步骤关联的 Job 结束后，确认推进计划。"""
-    plan = _load_owned_plan(user, plan_id)
-    if plan.current_index < 0 or plan.current_index >= len(plan.steps):
-        raise HTTPException(status_code=400, detail={"code": "no_step", "message": "没有当前步骤"})
-    step = plan.steps[plan.current_index]
-    if not step.job_id:
-        raise HTTPException(status_code=400, detail={"code": "no_job", "message": "当前步骤没有关联 Job"})
-    job = db.query(Job).filter(Job.id == step.job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Job 不存在"})
-    try:
-        plan = agent_orchestrate.ack_job_step(plan, job)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "ack_failed", "message": str(e)}) from e
-    return AgentRunStepOut(plan=plan, message=job.message or job.status)
-
-
-@router.patch("/plans/{plan_id}", response_model=AgentPlanOut)
-def patch_agent_plan(
-    plan_id: str,
-    body: AgentPlanPatchRequest,
-    user: User = Depends(get_current_user),
-) -> AgentPlanOut:
-    """微调计划：改 epochs/batch/device/权重，或移除未执行的可选步骤。"""
-    plan = _load_owned_plan(user, plan_id)
-    try:
-        return agent_orchestrate.patch_plan(
-            plan,
-            {
-                "epochs": body.epochs,
-                "batch": body.batch,
-                "device": body.device,
-                "pretrained_weight": body.pretrained_weight,
-                "remove_step_ids": body.remove_step_ids,
-            },
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail={"code": "patch_failed", "message": str(e)}) from e
-
-
-@router.post("/plans/{plan_id}/cancel", response_model=AgentPlanOut)
-def cancel_agent_plan(plan_id: str, user: User = Depends(get_current_user)) -> AgentPlanOut:
-    plan = _load_owned_plan(user, plan_id)
-    return agent_orchestrate.cancel_plan(plan)
-
-
-# ---------- 对话式 Agent ----------
+router = APIRouter(prefix="/agent", tags=["AI Agent"])
 
 
 def _load_owned_chat(user: User, session_id: str) -> AgentChatSessionOut:

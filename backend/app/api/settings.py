@@ -53,7 +53,6 @@ class MenuVisibility(BaseModel):
     models: bool = True
     infer: bool = True
     agent_chat: bool = True
-    agent_orchestrate: bool = True
     weights: bool = True
     settings: bool = True
 

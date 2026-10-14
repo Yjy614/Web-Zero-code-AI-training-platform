@@ -28,7 +28,6 @@ _DEFAULT_MENU_VISIBILITY = {
     "models": True,
     "infer": True,
     "agent_chat": True,
-    "agent_orchestrate": True,
     "weights": True,
     "settings": True,
     # 用户管理不在此列：仅管理员可见

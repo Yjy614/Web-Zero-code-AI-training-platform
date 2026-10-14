@@ -37,19 +37,4 @@ export function clearDetectWizardState() {
   clearWizardState('segment')
   clearWizardState('pose')
   clearTrainConfigDrafts()
-  clearAgentOrchestrateState()
-}
-
-const AGENT_ORCHESTRATE_KEY = 'agent-orchestrate-ui-state'
-
-export function agentOrchestrateStateKey() {
-  return AGENT_ORCHESTRATE_KEY
-}
-
-export function clearAgentOrchestrateState() {
-  try {
-    sessionStorage.removeItem(AGENT_ORCHESTRATE_KEY)
-  } catch {
-    // 忽略存储失败
-  }
 }

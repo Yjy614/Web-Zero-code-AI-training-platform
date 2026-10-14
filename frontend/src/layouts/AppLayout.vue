@@ -8,7 +8,6 @@ import {
   Collection,
   Cpu,
   Crop,
-  List,
   MagicStick,
   PictureFilled,
   Setting,
@@ -54,7 +53,6 @@ const flatMenus = computed((): MenuItem[] => {
     { path: '/app/resources/models', title: '模型库', icon: Box, key: 'models' },
     { path: '/app/resources/infer', title: '推理试用', icon: PictureFilled, key: 'infer' },
     { path: '/app/agent/chat', title: 'AI Agent', icon: MagicStick, key: 'agent_chat' },
-    { path: '/app/agent/orchestrate', title: '流程编排', icon: List, key: 'agent_orchestrate' },
     { path: '/app/resources/weights', title: '基础模型权重仓库', icon: Cpu, key: 'weights' },
   ].filter((item) => vis[item.key as keyof typeof vis] !== false)
 
@@ -169,7 +167,7 @@ async function onLogout() {
       </header>
       <main class="content fade-up">
         <RouterView v-slot="{ Component, route: r }">
-          <KeepAlive :include="['DetectWizard', 'SegmentWizard', 'PoseWizard', 'AgentOrchestrate', 'AgentChat']" :max="12">
+          <KeepAlive :include="['DetectWizard', 'SegmentWizard', 'PoseWizard', 'AgentChat']" :max="12">
             <component :is="Component" :key="String(r.name || r.path)" />
           </KeepAlive>
         </RouterView>
